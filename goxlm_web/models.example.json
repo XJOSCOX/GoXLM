@@ -1,0 +1,12 @@
+{
+  "device": "auto",
+  "models": [
+    {
+      "id": "goxlm-0.1",
+      "label": "GoXLM-0.1",
+      "format": "0.1",
+      "path": "checkpoints/goxlm_v01.pt",
+      "sha256": "94fd77371db338df7e158d9d284e4b103fd9d108cf3614aa16336eb71932150b"
+    }
+  ]
+}

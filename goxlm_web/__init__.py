@@ -1,0 +1,1 @@
+"""Local GoXLM inference service."""
