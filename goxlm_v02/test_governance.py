@@ -7,7 +7,7 @@ import torch
 from .audit_tool import checkpoint_impact, inventory, overlap_report
 from .common import canonical, digest
 from .data import build, freeze_path, load_release, permanent_gate, read, revoke
-from .run import CHECKPOINT
+from .run import CHECKPOINT_SCHEMAS
 
 from . import test_v02
 
@@ -47,9 +47,11 @@ class GovernanceTests(unittest.TestCase):
         snapshot = inventory(self.catalog)
         self.assertEqual([], snapshot["errors"])
         self.assertEqual({key, "mirror"}, set(snapshot["releases"][newer.stem]["affected"]))
-        path = self.fixture.root / "synthetic.pt"
-        torch.save({"schema": CHECKPOINT, "dataset_version": newer.stem}, path)
-        self.assertEqual("affected", checkpoint_impact(snapshot, [path])[0]["status"])
+        for i, schema in enumerate(CHECKPOINT_SCHEMAS):
+            with self.subTest(schema=schema):
+                path = self.fixture.root / f"synthetic-{i}.pt"
+                torch.save({"schema": schema, "dataset_version": newer.stem}, path)
+                self.assertEqual("affected", checkpoint_impact(snapshot, [path])[0]["status"])
         self.assertNotIn(key, {row["document_id"] for row in
                                load_release(self.catalog, build(self.catalog))["documents"]})
 

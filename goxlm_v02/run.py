@@ -1,4 +1,5 @@
 """Versioned training, deterministic holdout scoring and checkpoint validation."""
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 import math
 import os
@@ -17,7 +18,10 @@ from .common import ROOT, git_provenance, publish, source_fingerprint, verify_ba
 from .data import affected_documents, catalog_lock, load_release, revoked
 from .model import MODEL, MODEL_VERSION, TOKENIZER, new_model, windows
 
-CHECKPOINT = "goxlm-checkpoint-0.2.1"
+LEGACY_CHECKPOINT = "goxlm-checkpoint-0.2.1"
+CHECKPOINT = "goxlm-checkpoint-0.2.2"
+CHECKPOINT_SCHEMAS = (LEGACY_CHECKPOINT, CHECKPOINT)
+PRECISIONS = ("fp32", "bf16")
 
 
 @dataclass(frozen=True)
@@ -99,9 +103,53 @@ def evaluate(model, rows, device, batch_size=8):
             "domains": {key: score(*value) for key, value in sorted(by_domain.items())}}
 
 
+def check_precision(precision, device):
+    if precision not in PRECISIONS:
+        raise ValueError(f"Unsupported training precision: {precision}")
+    if precision == "bf16":
+        if device.type != "cuda" or not torch.cuda.is_available():
+            raise ValueError("BF16 training requires native CUDA BF16 support")
+        with torch.cuda.device(device):
+            if not torch.cuda.is_bf16_supported(including_emulation=False):
+                raise ValueError("BF16 training requires native CUDA BF16 support")
+
+
+def checkpoint_precision(checkpoint):
+    precision = checkpoint.get("precision", "fp32" if checkpoint["schema"] == LEGACY_CHECKPOINT else None)
+    if precision not in PRECISIONS or (checkpoint["schema"] == LEGACY_CHECKPOINT and precision != "fp32"):
+        raise ValueError("Invalid checkpoint precision")
+    return precision
+
+
+def verify_float32_state(tensors, label):
+    by_device = {}
+    for tensor in tensors:
+        if not isinstance(tensor, torch.Tensor) or tensor.dtype != torch.float32:
+            raise ValueError(f"Checkpoint {label} tensors must be finite float32")
+        by_device.setdefault(tensor.device, []).append(tensor)
+    for group in by_device.values():
+        if not torch.stack([tensor.isfinite().all() for tensor in group]).all().item():
+            raise ValueError(f"Checkpoint {label} tensors must be finite float32")
+
+
+def verify_adamw(optimizer, updates):
+    parameters = [key for group in optimizer["param_groups"] for key in group["params"]]
+    state = optimizer["state"]
+    if not parameters or len(parameters) != len(state) or set(parameters) != set(state):
+        raise ValueError("Checkpoint AdamW state does not match its parameter groups")
+    moments = []
+    for entry in state.values():
+        step = entry["step"]
+        if (not isinstance(step, torch.Tensor) or step.dtype != torch.float32
+                or step.ndim != 0 or step.item() != updates):
+            raise ValueError("Checkpoint AdamW state and optimizer update count disagree")
+        moments.extend([entry["exp_avg"], entry["exp_avg_sq"]])
+    verify_float32_state(moments, "optimizer")
+
+
 def load_checkpoint(path, device="cpu"):
     checkpoint = torch.load(path, weights_only=True, map_location="cpu")
-    if (checkpoint.get("schema") != CHECKPOINT
+    if (checkpoint.get("schema") not in CHECKPOINT_SCHEMAS
             or checkpoint.get("model_version") != MODEL_VERSION
             or checkpoint.get("model_config") != MODEL
             or checkpoint.get("tokenizer") != TOKENIZER):
@@ -110,6 +158,7 @@ def load_checkpoint(path, device="cpu"):
     if type(steps) is not int or steps < 1 or [r["step"] for r in history] != list(
             range(1, steps + 1)):
         raise ValueError("Checkpoint step and history disagree")
+    checkpoint_precision(checkpoint)
     RunConfig(**checkpoint["run_config"])
     for field in ("dataset_version", "code_revision"):
         if not re.fullmatch(r"[0-9a-f]{64}", checkpoint[field]):
@@ -119,13 +168,16 @@ def load_checkpoint(path, device="cpu"):
     state = checkpoint["model"]
     if not torch.equal(state["lm_head.weight"], state["token_embedding.weight"]):
         raise ValueError("Checkpoint has inconsistent tied weights")
-    if any(tensor.dtype != torch.float32 or not torch.isfinite(tensor).all()
-           for tensor in state.values()):
-        raise ValueError("Checkpoint model tensors must be finite float32")
+    verify_float32_state(state.values(), "model")
     model.load_state_dict(state, strict=True)
     for field in ("optimizer", "rng", "environment", "hardware"):
         if not isinstance(checkpoint[field], dict):
             raise ValueError(f"Invalid checkpoint {field}")
+    if checkpoint["schema"] == CHECKPOINT:
+        updates = checkpoint.get("optimizer_updates")
+        if type(updates) is not int or updates != steps:
+            raise ValueError("Checkpoint step and optimizer update count disagree")
+        verify_adamw(checkpoint["optimizer"], updates)
     rng = checkpoint["rng"]
     torch.Generator().set_state(rng["torch"])
     torch.Generator().set_state(rng["sampler"])
@@ -133,17 +185,18 @@ def load_checkpoint(path, device="cpu"):
     return model.to(device).eval(), checkpoint
 
 
-def train(catalog, release, output, steps, device, config, resume=None, checkpoint_every=1):
+def train(catalog, release, output, steps, device, config, resume=None, checkpoint_every=1,
+          *, precision="fp32"):
+    device = torch.device(device)
+    if device.type == "cuda":
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    check_precision(precision, device)
     verify_baseline()
     if type(steps) is not int or steps < 1:
         raise ValueError("steps must be a positive integer")
     if type(checkpoint_every) is not int or checkpoint_every < 1:
         raise ValueError("checkpoint_every must be a positive integer")
     dataset = load_release(catalog, release)
-    device = torch.device(device)
-    if device.type == "cuda":
-        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-        torch.cuda.get_device_properties(device)
     torch.use_deterministic_algorithms(True)
     random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -151,13 +204,17 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
     env = environment(device)
     identity = {"schema": CHECKPOINT, "model_version": MODEL_VERSION, "model_config": MODEL,
                 "run_config": asdict(config), "dataset_version": release.stem,
-                "tokenizer": TOKENIZER, "code_revision": revision(), "environment": env}
+                "tokenizer": TOKENIZER, "code_revision": revision(), "environment": env,
+                "precision": precision}
     start, history = 0, []
     if resume is None:
         model = new_model().to(device)
     else:
         model, saved = load_checkpoint(resume, device)
-        if any(saved[key] != value for key, value in identity.items()):
+        if checkpoint_precision(saved) != precision:
+            raise ValueError("Cannot change training precision when resuming a checkpoint")
+        previous_identity = dict(identity, schema=saved["schema"])
+        if any(saved.get(key) != value for key, value in previous_identity.items() if key != "precision"):
             raise ValueError("Resume requires matching data, configuration, code and environment")
         start, history = saved["step"], saved["history"]
     if steps <= start:
@@ -182,6 +239,8 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     model.train()
+    updates = start
+    train_seconds = validation_seconds = checkpoint_seconds = 0.0
     started = time.perf_counter()
     cpu_start = time.process_time()
     trained_bytes = 0
@@ -190,16 +249,19 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
         indices = torch.randint(len(train_windows), (config.batch_size,), generator=sampler)
         x, y = make_batch([train_windows[i] for i in indices.tolist()], device)
         optimizer.zero_grad(set_to_none=True)
-        _, loss = model(x, y)
+        with (torch.autocast("cuda", dtype=torch.bfloat16) if precision == "bf16" else nullcontext()):
+            _, loss = model(x, y)
         if not torch.isfinite(loss).item():
             raise ValueError("Nonfinite training loss")
         loss.backward()
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip,
                                               error_if_nonfinite=True)
         optimizer.step()
+        updates += 1
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         elapsed = time.perf_counter() - step_start
+        train_seconds += elapsed
         count = (y != -100).sum().item()
         trained_bytes += count
         record = {"step": step, "train_loss": loss.item(), "gradient_norm": norm.item(),
@@ -207,7 +269,10 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
         history.append(record)
         if step % checkpoint_every and step != steps:
             continue
+        validation_start = time.perf_counter()
         record["validation"] = evaluate(model, validation, device, config.batch_size)
+        validation_seconds += time.perf_counter() - validation_start
+        checkpoint_start = time.perf_counter()
         elapsed_run = time.perf_counter() - started
         hardware = {"segment_wall_seconds": elapsed_run,
                     "segment_process_cpu_seconds": time.process_time() - cpu_start,
@@ -217,8 +282,11 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
         if device.type == "cuda":
             hardware.update(gpu_peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
                             gpu_peak_reserved_bytes=torch.cuda.max_memory_reserved(device))
-        checkpoint = {**identity, **provenance, "step": step, "model": model.state_dict(),
-                      "optimizer": optimizer.state_dict(), "history": history,
+        state, adamw = model.state_dict(), optimizer.state_dict()
+        verify_float32_state(state.values(), "model")
+        verify_adamw(adamw, updates)
+        checkpoint = {**identity, **provenance, "step": step, "optimizer_updates": updates,
+                      "model": state, "optimizer": adamw, "history": history,
                       "hardware": hardware, "rng": {"python": random.getstate(),
                       "torch": torch.get_rng_state(), "sampler": sampler.get_state(),
                       "cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else []}}
@@ -227,4 +295,13 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
             if affected_documents(dataset["documents"], revoked(catalog)):
                 raise ValueError("Rights revoked during run. Checkpoint publication blocked.")
             publish(path, lambda stream: torch.save(checkpoint, stream))
+        checkpoint_seconds += time.perf_counter() - checkpoint_start
+    write_json(output / "metrics.0.2.json", {
+        "schema": "goxlm-segment-metrics-0.2.2", "precision": precision,
+        "first_step": start + 1, "last_step": steps, "optimizer_updates": updates - start,
+        "training_target_bytes": trained_bytes, "training_seconds": train_seconds,
+        "validation_seconds": validation_seconds, "checkpoint_seconds": checkpoint_seconds,
+        "wall_seconds": time.perf_counter() - started,
+        "hardware": hardware,
+    })
     return path

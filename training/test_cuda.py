@@ -69,11 +69,19 @@ class CudaTests(unittest.TestCase):
                 self.assertFalse(torch.equal(first[:, -1], second[:, -1]))
 
     def test_checkpoint_save_and_bitwise_resume(self):
-        # Exercise the existing versioned checkpoint and deterministic RNG path.
+        self.check_resume("fp32")
+
+    def test_bf16_checkpoint_save_and_bitwise_resume(self):
+        if "bf16" not in supported_precisions(self.device):
+            self.skipTest("Native CUDA BF16 is unavailable")
+        self.check_resume("bf16")
+
+    def check_resume(self, precision):
+        # Exercise the versioned checkpoint and deterministic RNG path.
         fixture = test_v02.PipelineTests("test_reproducible_resume_and_evaluation")
         self.addCleanup(fixture.doCleanups)
         deterministic = torch.are_deterministic_algorithms_enabled()
         self.addCleanup(torch.use_deterministic_algorithms, deterministic)
         with patch.dict(os.environ, {"GOXLM_TEST_DEVICE": "cuda"}):
             fixture.setUp()
-            fixture.test_reproducible_resume_and_evaluation()
+            fixture.check_checkpoint_resume(precision)

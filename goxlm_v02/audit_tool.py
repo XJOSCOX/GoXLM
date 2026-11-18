@@ -45,6 +45,8 @@ def inventory(catalog):
 def checkpoint_impact(inventory_report, roots):
     import torch
 
+    from .run import CHECKPOINT_SCHEMAS
+
     paths = set()
     for root in roots:
         if not root.exists():
@@ -59,7 +61,7 @@ def checkpoint_impact(inventory_report, roots):
         try:
             checkpoint = torch.load(path, weights_only=True, map_location="cpu")
             version = checkpoint.get("dataset_version")
-            if checkpoint.get("schema") != "goxlm-checkpoint-0.2.1" or not isinstance(
+            if checkpoint.get("schema") not in CHECKPOINT_SCHEMAS or not isinstance(
                     version, str) or not re.fullmatch(r"[0-9a-f]{64}", version):
                 row["status"] = "untracked_format"
             else:
