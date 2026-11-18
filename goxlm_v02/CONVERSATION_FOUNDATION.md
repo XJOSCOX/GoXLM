@@ -63,25 +63,35 @@ cross-field origin, requested-use, and digest checks during intake.
 - Use `seal DRAFT_INPUT SEALED_PATH` to capture the hash of exact UTF-8
   turns and origins in a new draft. Each pair contains a user message and
   assistant reply. Supply opaque contributor, scenario and evidence refs.
-- Use `audit SEALED_PATH...` for context compatibility and normalized text
-  and shingle overlap checks. The default tokenizer fixture counts raw
-  bytes and framing. An exact proposed tokenizer may be supplied with
-  `--tokenizer`. Treat overlap flags as review aids and group shared
-  authors, scenarios and source material before assigning holdouts.
-- Only human-written training candidates can enter `stage STORE SEALED_PATH
-  QUALITY_JSON EVIDENCE_INDEX INPUT_ROOT`. The quality document carries the
-  sealed file SHA-256, reviewer ref, ISO date, and integer scores 0–2 for
-  naturalness, intent, accuracy, context, completeness and format. The
-  current gate requires at least 10/12 with no zeros and full marks for
-  accuracy and context. The evidence index maps opaque refs to relative
-  files under the declared root. Stage requires exact evidence hashes,
-  authorship and commercial scope evidence, independent quality scoring,
-  and a complete 256-token context fit. With no tokenizer argument the
-  fit check uses a conservative byte fixture.
-- Stage creates an undecided case in the existing protected review ledger.
-  An authorized human uses its separate interactive review commands for
-  the exact extract hash and verified rights. Keep this store isolated
-  from the pretraining catalog. Synthetic records are plumbing fixtures.
+- Use `audit SEALED_PATH...` for context fit, normalized exact matches,
+  near-duplicate shingles, and likely private-data patterns. Pass
+  `--against PRIOR_DRAFT...` to compare with other batches or held-out
+  fixtures. The report emits draft IDs and flag categories without the
+  matched text. These checks miss some paraphrases and personal data.
+  Separately review source, author and scenario links before splitting.
+- Use `quality-schema` to prepare an operator's private assessment. The
+  review records the exact sealed file SHA-256, reviewer ref, ISO date,
+  accepted/hold/rejected decision, all six rubric scores, and explicit
+  notes for naturalness, accuracy, follow-up consistency, privacy and
+  duplicates. Basic STEM acceptance requires a fact-check ref bound to
+  the draft. Other declared fact-check refs must also match the draft.
+- Use `record-quality STORE SEALED_PATH ASSESSMENT_JSON RECORDED_QUALITY`
+  in an interactive WSL terminal. An allowlisted operator confirms the
+  exact draft SHA-256. The CLI saves a hash-verified quality envelope
+  separately from the rights ledger. Accepted assessments require at
+  least 10/12, no zeros, full accuracy and context marks, and no
+  unresolved structured privacy flags. Redactions require a
+  new draft and a new exact review.
+- Use `stage STORE SEALED_PATH RECORDED_QUALITY EVIDENCE_INDEX INPUT_ROOT`
+  for accepted human-written training candidates. The evidence index
+  maps opaque refs to relative files under the input root. Stage checks
+  exact evidence hashes, authorship and scope evidence, independent
+  quality acceptance and full 256-token context fit. With no tokenizer
+  argument, the context check uses the conservative byte fixture.
+- Staging creates an undecided case. A separate authorized human uses
+  the protected rights-review CLI to confirm the exact extract hash and
+  commercial-training permission. Keep this store isolated from the
+  pretraining catalog. Synthetic records are plumbing fixtures.
   AI-assisted drafts remain quarantined for scope review.
 
 ## Validation

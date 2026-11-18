@@ -3,8 +3,10 @@
 import argparse
 from collections import Counter
 from datetime import date
-from itertools import combinations
+from itertools import chain, combinations, product
 import json
+import re
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated, Literal
@@ -16,13 +18,23 @@ from goxlm_v02.overlap import terms
 from goxlm_v02.tokenizer import ByteBPE, load_tokenizer
 from goxlm_web.conversation import ConversationBudgetError, Message, format_conversation
 
-from .staging import batch, relative_file
+from .ledger import local_operator
+from .staging import batch, config, relative_file
 
 Origin = Literal["human_written", "ai_assisted", "synthetic"]
 Ref = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9._:-]{1,128}$")]
 SHA = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
 PILOT_SCHEMA = "goxlm-instruction-pilot-draft-v1"
+QUALITY_SCHEMA = "goxlm-dialogue-quality-v1"
 SCORE_NAMES = {"naturalness", "intent", "accuracy", "context", "completeness", "format"}
+ReviewNote = Annotated[str, StringConstraints(pattern=r"\S", max_length=2000)]
+PRIVATE_PATTERNS = {
+    "email": re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
+    "formatted_phone": re.compile(r"(?<!\d)(?:\+1[-. ]?)?(?:\(\d{3}\)\s*|\d{3}[-. ])\d{3}[-. ]\d{4}(?!\d)"),
+    "formatted_government_id": re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)"),
+    "private_key_header": re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"),
+}
+
 
 
 class StrictRecord(BaseModel):
@@ -100,14 +112,66 @@ class QualityReview(StrictRecord):
     draft_sha256: SHA
     reviewer_ref: Ref
     review_date: str
+    decision: Literal["accepted", "hold", "rejected"]
     scores: dict[str, Annotated[int, Field(ge=0, le=2)]]
+    naturalness_note: ReviewNote
+    accuracy_note: ReviewNote
+    fact_check_refs: list[Ref]
+    followup_note: ReviewNote
+    privacy_note: ReviewNote
+    duplicate_note: ReviewNote
 
-    def verify(self, draft_sha):
+    def verify(self, draft, draft_sha):
         if (date.fromisoformat(self.review_date).isoformat() != self.review_date
-                or self.draft_sha256 != draft_sha or self.scores.keys() != SCORE_NAMES
-                or min(self.scores.values()) < 1 or sum(self.scores.values()) < 10
+                or self.draft_sha256 != draft_sha or self.scores.keys() != SCORE_NAMES):
+            raise ValueError("Quality review must identify the exact draft and full rubric")
+        if self.reviewer_ref == draft.contributor_ref:
+            raise ValueError("Quality reviewer must differ from the contributor")
+        if self.decision != "accepted":
+            return
+        if (min(self.scores.values()) < 1 or sum(self.scores.values()) < 10
                 or self.scores["accuracy"] != 2 or self.scores["context"] != 2):
-            raise ValueError("Quality review does not meet the rubric for the exact draft")
+            raise ValueError("Accepted quality review does not meet the rubric")
+        evidence = {entry.ref for entry in draft.evidence_refs if entry.kind == "fact_check"}
+        if (not set(self.fact_check_refs) <= evidence
+                or (draft.task_class == "basic_stem" and not self.fact_check_refs)):
+            raise ValueError("Fact-check references must be bound to the draft and are required for basic STEM")
+        if privacy_flags(draft):
+            raise ValueError("Potential private data requires a redacted draft and fresh review")
+
+
+def privacy_flags(draft):
+    return sorted({kind for message in draft.messages() for kind, pattern in PRIVATE_PATTERNS.items()
+                   if pattern.search(message.text)})
+
+
+def record_quality(store, draft_path, review_path, output):
+    operator = local_operator(store)
+    if not sys.stdin.isatty():
+        raise ValueError("Quality decisions require an interactive WSL terminal")
+    raw = Path(draft_path).read_bytes()
+    grade = QualityReview.model_validate_json(Path(review_path).read_bytes())
+    grade.verify(Draft.model_validate_json(raw), digest(raw))
+    if input(f"Type the full draft SHA-256 to record your {grade.decision} quality decision: ").strip() != grade.draft_sha256:
+        raise ValueError("Draft hash confirmation did not match")
+    payload = {"schema": QUALITY_SCHEMA, "operator": operator, "review": grade.model_dump()}
+    write_json(output, {"quality": payload, "quality_sha256": digest(canonical(payload))})
+
+
+def load_quality(store, raw, draft, draft_sha):
+    envelope = json.loads(raw)
+    if not isinstance(envelope, dict) or set(envelope) != {"quality", "quality_sha256"}:
+        raise ValueError("Stage requires a recorded quality decision envelope")
+    payload = envelope["quality"]
+    if (not isinstance(payload, dict) or set(payload) != {"schema", "operator", "review"}
+            or payload["schema"] != QUALITY_SCHEMA
+            or payload["operator"] not in config(store)["operators"]
+            or digest(canonical(payload)) != envelope["quality_sha256"]):
+        raise ValueError("Quality decision integrity or operator check failed")
+    grade = QualityReview.model_validate(payload["review"])
+    grade.verify(draft, draft_sha)
+    return grade
+
 
 
 def seal(value):
@@ -131,9 +195,7 @@ def inspect_context(draft, tokenizer, context):
     return True
 
 
-def audit(drafts, tokenizer, context=256):
-    if type(context) is not int or context < 4:
-        raise ValueError("Invalid pilot context length")
+def _audit_rows(drafts):
     rows = []
     keys = set()
     for draft in drafts:
@@ -141,23 +203,33 @@ def audit(drafts, tokenizer, context=256):
         if key in keys:
             raise ValueError("Repeated draft ID and revision")
         keys.add(key)
-        messages = draft.messages()
-        words = tuple(word for message in messages for word in terms(message.text))
+        words = tuple(word for message in draft.messages() for word in terms(message.text))
         grams = set(zip(*(words[offset:] for offset in range(5))))
         rows.append((draft, key, words, grams))
+    return rows
+
+
+def audit(drafts, tokenizer, context=256, *, against=()):
+    if type(context) is not int or context < 4:
+        raise ValueError("Invalid pilot context length")
+    rows = _audit_rows(drafts)
+    prior = _audit_rows(against)
     findings = []
-    for (_, left, words, grams), (_, right, other, rest) in combinations(rows, 2):
+    for (_, left, words, grams), (_, right, other, rest) in chain(combinations(rows, 2), product(rows, prior)):
         shared = len(grams & rest)
         if words and words == other:
             findings.append([left, right, "normalized_exact"])
         elif shared >= 12 and (shared / len(grams | rest) >= .80 or shared / min(len(grams), len(rest)) >= .90):
             findings.append([left, right, "near_duplicate"])
     return {"drafts": len(rows),
+            "comparison_drafts": len(prior),
             "origins": dict(Counter(d.authoring_origin for d, *_ in rows)),
             "categories": dict(Counter(d.task_class for d, *_ in rows)),
             "multi_turn": sum(len(d.turns) >= 2 for d, *_ in rows),
             "context": context,
             "context_compatible": sum(inspect_context(d, tokenizer, context) for d, *_ in rows),
+            "privacy_flags": {f"{key[0]}.r{key[1]}": flags for draft, key, *_ in rows
+                              if (flags := privacy_flags(draft))},
             "overlap_findings": findings}
 
 
@@ -174,10 +246,9 @@ def stage(store, draft_path, quality_path, evidence_index, input_root, tokenizer
         raise ValueError("The complete draft does not fit the 256-token instruction context")
     index = json.loads(Path(evidence_index).read_bytes())
     quality = Path(quality_path).read_bytes()
-    grade = QualityReview.model_validate_json(quality)
-    grade.verify(digest(raw))
-    if grade.reviewer_ref == draft.contributor_ref:
-        raise ValueError("Quality reviewer must differ from the contributor")
+    grade = load_quality(store, quality, draft, digest(raw))
+    if grade.decision != "accepted":
+        raise ValueError("The draft needs a separate accepted writing-quality decision")
     with TemporaryDirectory(prefix="goxlm-dialogue-bridge-") as directory:
         root = Path(directory)
 
@@ -209,6 +280,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("schema")
+    commands.add_parser("quality-schema")
     seal_cmd = commands.add_parser("seal")
     seal_cmd.add_argument("input", type=Path)
     seal_cmd.add_argument("output", type=Path)
@@ -216,6 +288,10 @@ def main():
     check.add_argument("input", type=Path, nargs="+")
     check.add_argument("--tokenizer", type=Path)
     check.add_argument("--context", type=int, default=256)
+    check.add_argument("--against", type=Path, nargs="+", default=[])
+    quality_cmd = commands.add_parser("record-quality")
+    for name in ("store", "draft", "decision", "output"):
+        quality_cmd.add_argument(name, type=Path)
     stage_cmd = commands.add_parser("stage")
     for name in ("store", "draft", "quality", "evidence_index", "input_root"):
         stage_cmd.add_argument(name, type=Path)
@@ -223,13 +299,19 @@ def main():
     args = parser.parse_args()
     if args.action == "schema":
         result = Draft.model_json_schema()
+    elif args.action == "quality-schema":
+        result = QualityReview.model_json_schema()
     elif args.action == "seal":
         value = seal(json.loads(args.input.read_bytes()))
         write_json(args.output, value.model_dump(exclude_none=True))
         return
     elif args.action == "audit":
         tokenizer = load_tokenizer(args.tokenizer) if args.tokenizer else ByteBPE("0"*64, "0"*64, 259, ())
-        result = audit([Draft.model_validate_json(path.read_bytes()) for path in args.input], tokenizer, args.context)
+        result = audit([Draft.model_validate_json(path.read_bytes()) for path in args.input], tokenizer, args.context,
+                       against=[Draft.model_validate_json(path.read_bytes()) for path in args.against])
+    elif args.action == "record-quality":
+        record_quality(args.store, args.draft, args.decision, args.output)
+        return
     else:
         result = stage(args.store, args.draft, args.quality, args.evidence_index, args.input_root, args.tokenizer)
     print(json.dumps(result, indent=2))
