@@ -144,3 +144,6 @@ synchronized first-token latency, sustained byte tokens per second, p95
 inter-token latency, and PyTorch peak allocation and reservation. The
 initial checkpoint load is measured separately. Browser transport and
 rendering are outside these timings.
+
+See [Conversation format and development plan](CONVERSATION.md) for the
+versioned formatter contract and planned chat adapter.
