@@ -107,3 +107,40 @@ counts emitted byte tokens during decoding and excludes the cold model load.
 When adding a larger checkpoint format, validate its tokenizer, context,
 memory profile, and cancellation behavior before listing it in the web allowlist.
 Live inference and performance do not require an external model service or dataset.
+
+
+## Web 0.2 inference
+
+Full forward is the default. Select **KV cache** in generation settings
+to try request-local cached decoding. It reuses attention keys and values
+until the context fills. Each subsequent step rebuilds the retained window
+with positions starting at zero, matching the existing learned position
+embeddings and rolling-context semantics. The cache is freed when the
+request ends. Token IDs match the reference in greedy regression tests.
+Small floating-point differences can affect sampled continuations.
+
+The model list distinguishes configured metadata from metadata verified
+after a successful checkpoint load. In generation settings, select a
+second allowlisted model to compare it with the primary model. Both receive
+the same prompt, sampling settings, decode strategy and seed. Completions
+appear side by side on wide screens. Models run sequentially with one
+resident checkpoint. Stopping cancels the active stream and skips any
+remaining comparison. A disconnect holds the generation slot until the
+in-flight operation finishes. Deserialization and GPU kernels can only be
+interrupted between operations.
+
+From the project root, run local CUDA parity and benchmark the allowlisted
+GoXLM-0.1 checkpoint. These commands leave the checkpoint read-only. Keep
+results in the ignored local runs directory.
+
+```bash
+GOXLM_WEB_TEST_CUDA=1 OMP_NUM_THREADS=1 ../.venv/bin/python -B -m unittest -v goxlm_web.test_web.CacheTests
+mkdir -p runs/web-cache-local
+OMP_NUM_THREADS=1 ../.venv/bin/python -B -m goxlm_web.benchmark > runs/web-cache-local/cache-benchmark.json
+```
+
+The benchmark warms both paths, alternates their trial order, and reports
+synchronized first-token latency, sustained byte tokens per second, p95
+inter-token latency, and PyTorch peak allocation and reservation. The
+initial checkpoint load is measured separately. Browser transport and
+rendering are outside these timings.
