@@ -159,3 +159,36 @@ retrieval grounding and privacy evaluations before release.
    lineage tracing with synthetic records. Require exact traceability from
    any included record to releases and checkpoints. Authorize each future
    corpus acquisition and training experiment separately.
+
+## Offline routing prototype
+
+`goxlm_web.live_router` is a model-independent Python module. It assigns a
+deterministic intent for ordinary conversation, timeless questions, news,
+stock quotes, or clarification. A small fixture instrument map resolves a
+few common names, and the syntax accepts a single explicitly qualified
+exchange and ticker for testing. It does not verify real listing metadata.
+Unsupported fresh topics, multiple instruments, and mixed news and quote
+requests ask for clarification. The classifier is English and rule based.
+
+Permission defaults to disabled. With opt-in enabled, an explicit approve
+or deny decision applies only to the exact route and outbound query preview.
+The module has no transport and sends no data. Future transport must bind
+consent to the session, one action, provider, and expiry. Existing Web
+endpoints and completion behavior remain unchanged.
+
+Source and retrieval timestamps stay separate. The clock and freshness
+policy are explicit inputs. Missing or invalid times produce an unverified
+or invalid status, and a late retrieval cannot refresh an old source.
+Quote delivery comes from the fixture metadata. A delay and freshness can
+both appear in the label. A production adapter must verify entitlement and
+session policy, including exchange calendars and timestamps, before making
+a real-time claim.
+
+Run the offline tests from the repository root.
+
+```bash
+../.venv/bin/python -B -m unittest -v goxlm_web.test_live_router
+```
+
+Fixtures guard socket creation and DNS lookups. The prototype has no paid
+API, network client, model dependency, or UI integration.
