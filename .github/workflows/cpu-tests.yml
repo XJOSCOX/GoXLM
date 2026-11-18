@@ -31,7 +31,7 @@ jobs:
         run: |
           python -c 'import torch; assert torch.version.cuda is None'
           python -B test_model.py
-          python -B -m unittest -v training.test_train goxlm_v02.test_v02 goxlm_v02.test_governance goxlm_review.test_pilot goxlm_web.test_web goxlm_web.test_conversation training.test_conversation_foundation
+          python -B -m unittest -v training.test_train goxlm_v02.test_v02 goxlm_v02.test_governance goxlm_review.test_pilot goxlm_web.test_web goxlm_web.test_conversation training.test_conversation_foundation goxlm_web.test_live_router
 
   frontend:
     runs-on: ubuntu-24.04
