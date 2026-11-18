@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +8,7 @@ from unittest.mock import patch
 
 import torch
 
-from .common import canonical, digest, verify_baseline
+from .common import canonical, digest, git_provenance, verify_baseline
 from .data import build, intake, load_release, read, review
 from .model import decode, encode, generate, new_model, windows
 from .run import RunConfig, evaluate, load_checkpoint, train
@@ -107,6 +109,39 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 generate(model, text, **({"steps": 1} | bad))
 
+    @unittest.skipUnless(shutil.which("git"), "Git is required for this test")
+    def test_git_provenance_tracks_only_visible_changes(self):
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(self.root), *args],
+                                           stderr=subprocess.DEVNULL, text=True).strip()
+
+        git("init", "--quiet")
+        ignore = self.root / ".gitignore"
+        ignore.write_text("research/\n")
+        git("add", ".gitignore")
+        git("-c", "commit.gpgSign=false", "-c", "user.name=Synthetic Fixture",
+            "-c", "user.email=fixture@example.invalid",
+            "commit", "--quiet", "-m", "Synthetic fixture")
+        commit = git("rev-parse", "HEAD")
+        self.assertEqual({"commit_sha": commit, "dirty": False}, git_provenance(self.root))
+        self.assertEqual({"commit_sha": None, "dirty": None}, git_provenance(self.root / "absent"))
+        private = self.root / "research"
+        private.mkdir()
+        (private / "ignored.txt").write_text("Synthetic fixture")
+        self.assertEqual({"commit_sha": commit, "dirty": False}, git_provenance(self.root))
+        self.assertEqual({"commit_sha": None, "dirty": None}, git_provenance(private))
+        visible = self.root / "code.py"
+        visible.write_text("# Synthetic fixture\n")
+        self.assertEqual({"commit_sha": commit, "dirty": True}, git_provenance(self.root))
+        git("add", "code.py")
+        self.assertEqual({"commit_sha": commit, "dirty": True}, git_provenance(self.root))
+        git("-c", "commit.gpgSign=false", "-c", "user.name=Synthetic Fixture",
+            "-c", "user.email=fixture@example.invalid",
+            "commit", "--quiet", "-m", "Track fixture")
+        visible.write_text("# Modified fixture\n")
+        self.assertEqual({"commit_sha": git("rev-parse", "HEAD"), "dirty": True},
+                         git_provenance(self.root))
+
     def test_reproducible_resume_and_evaluation(self):
         baseline = self.root / "synthetic-baseline.txt"
         baseline.write_bytes(b"Synthetic baseline fixture.\n")
@@ -117,8 +152,18 @@ class PipelineTests(unittest.TestCase):
         release = self.release()
         config = RunConfig(batch_size=2)
         device = os.environ.get("GOXLM_TEST_DEVICE", "cpu")
-        one = train(self.catalog, release, self.root / "segment1", 1, device, config)
-        two = train(self.catalog, release, self.root / "segment2", 2, device, config, resume=one)
+        provenance = {"commit_sha": "a" * 40, "dirty": True}
+        with patch("goxlm_v02.run.git_provenance", return_value=provenance):
+            one = train(self.catalog, release, self.root / "segment1", 1, device, config)
+        _, saved = load_checkpoint(one)
+        self.assertEqual(provenance, saved["git"])
+        run = read(one.parent / "run.0.2.json")
+        self.assertEqual(provenance, run["git"])
+        self.assertEqual(saved["code_revision"], run["code_revision"])
+        old_checkpoint = self.root / "without-git.pt"
+        torch.save({key: value for key, value in saved.items() if key != "git"}, old_checkpoint)
+        two = train(self.catalog, release, self.root / "segment2", 2, device, config,
+                    resume=old_checkpoint)
         direct = train(self.catalog, release, self.root / "direct", 2, device, config)
         model, resumed = load_checkpoint(two, device)
         _, uninterrupted = load_checkpoint(direct, device)

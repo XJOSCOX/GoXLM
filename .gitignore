@@ -28,6 +28,8 @@ checkpoint-*/
 *.pth
 *.ckpt
 *.safetensors
+*.safetensors.index.json
+*.bin
 *.onnx
 *.gguf
 *.pkl
@@ -71,11 +73,13 @@ checkpoint-*/
 id_rsa*
 id_ed25519*
 credentials.*
+*-credentials.json
 secrets.*
 local_settings.*
 store.json
 reviewer*.json
 review-decisions*
+rights-evidence/
 /configs/*
 !/configs/train.example.json
 
