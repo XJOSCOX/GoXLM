@@ -17,12 +17,15 @@ import torch.nn.functional as F
 from .common import ROOT, git_provenance, publish, source_fingerprint, verify_baseline, write_json
 from .data import affected_documents, catalog_lock, load_release, revoked
 from .model import (EXPERIMENT_VERSION, MODEL, MODEL_VERSION, TOKENIZER, experiment_config,
-                    new_model, windows)
+                    conversation_config, new_model, token_windows, windows)
+from .tokenizer import format_identity, load_tokenizer, training_fingerprint, training_rows, validate_identity
 
 LEGACY_CHECKPOINT = "goxlm-checkpoint-0.2.1"
 CHECKPOINT = "goxlm-checkpoint-0.2.2"
 EXPERIMENT_CHECKPOINT = "goxlm-checkpoint-0.4.0-experimental"
-CHECKPOINT_SCHEMAS = (LEGACY_CHECKPOINT, CHECKPOINT, EXPERIMENT_CHECKPOINT)
+CONVERSATION_CHECKPOINT = "goxlm-checkpoint-0.5.0-conversation-base"
+CONVERSATION_VERSION = "goxlm-0.5-conversation-base"
+CHECKPOINT_SCHEMAS = (LEGACY_CHECKPOINT, CHECKPOINT, EXPERIMENT_CHECKPOINT, CONVERSATION_CHECKPOINT)
 PRECISIONS = ("fp32", "bf16")
 
 
@@ -45,8 +48,10 @@ class RunConfig:
             raise ValueError("Invalid optimizer configuration")
 
 
-def revision():
+def revision(conversation=False):
     paths = [ROOT / "model" / "transformer.py", *sorted(Path(__file__).parent.glob("*.py"))]
+    if conversation:
+        paths.append(ROOT / "goxlm_web" / "conversation.py")
     return source_fingerprint(ROOT, paths)
 
 
@@ -76,32 +81,43 @@ def make_batch(pairs, device):
     return torch.tensor(x, device=device), torch.tensor(y, device=device)
 
 
+def document_windows(text, context, tokenizer):
+    if tokenizer is None:
+        return windows(text, context)
+    # The reserved end-of-turn ID is also the boundary prefix for base documents.
+    return token_windows([tokenizer.vocab_size - 1, *tokenizer.encode(text)], context)
+
+
 @torch.inference_mode()
-def evaluate(model, rows, device, batch_size=8):
+def evaluate(model, rows, device, batch_size=8, *, tokenizer=None):
     previous = model.training
     model.eval()
     by_domain = {}
     try:
         for row in rows:
-            total, count = by_domain.get(row["domain"], (0.0, 0))
-            pairs = list(windows(row["text"], model.config.context_length))
+            total, count, byte_count = by_domain.get(row["domain"], (0.0, 0, 0))
+            pairs = list(document_windows(row["text"], model.config.context_length, tokenizer))
             for start in range(0, len(pairs), batch_size):
                 x, y = make_batch(pairs[start:start + batch_size], device)
                 logits, _ = model(x)
                 total += F.cross_entropy(logits.flatten(0, 1), y.flatten(),
                                          reduction="sum").item()
                 count += (y != -100).sum().item()
-            by_domain[row["domain"]] = (total, count)
+            byte_count += len(row["text"].encode("utf-8"))
+            by_domain[row["domain"]] = (total, count, byte_count)
     finally:
         model.train(previous)
 
-    def score(total, count):
-        if count == 0 or not math.isfinite(total):
+    def score(total, count, byte_count):
+        if not count or not byte_count or not math.isfinite(total):
             raise ValueError("Cannot score an empty or nonfinite evaluation")
-        return {"bytes": count, "loss": total / count, "bits_per_byte": total / count / math.log(2)}
+        result = {"bytes": byte_count, "loss": total / count,
+                  "bits_per_byte": total / byte_count / math.log(2)}
+        if tokenizer is not None:
+            result["tokens"] = count
+        return result
 
-    return {"overall": score(sum(v[0] for v in by_domain.values()),
-                             sum(v[1] for v in by_domain.values())),
+    return {"overall": score(*(sum(v[i] for v in by_domain.values()) for i in range(3))),
             "domains": {key: score(*value) for key, value in sorted(by_domain.items())}}
 
 
@@ -156,7 +172,15 @@ def load_checkpoint(path, device="cpu", *, allowed_schemas=CHECKPOINT_SCHEMAS):
         raise ValueError("Unsupported checkpoint schema for this reader")
     architecture = checkpoint.get("architecture")
     model_config = checkpoint.get("model_config")
-    if schema == EXPERIMENT_CHECKPOINT and isinstance(architecture, str) and isinstance(model_config, dict):
+    tokenizer_identity = checkpoint.get("tokenizer")
+    if schema == CONVERSATION_CHECKPOINT and architecture == "conversation" and isinstance(model_config, dict):
+        vocab = validate_identity(tokenizer_identity, checkpoint.get("dataset_version"))
+        expected_model = conversation_config(vocab, model_config.get("context_length"))
+        expected_version = CONVERSATION_VERSION
+        if (checkpoint.get("conversation_format") != format_identity(vocab)
+                or checkpoint.get("training_stage") != "base_pretraining"):
+            raise ValueError("Invalid conversation checkpoint format or stage")
+    elif schema == EXPERIMENT_CHECKPOINT and isinstance(architecture, str) and isinstance(model_config, dict):
         expected_model = experiment_config(architecture, model_config.get("context_length"))
         expected_version = EXPERIMENT_VERSION
     elif schema in (LEGACY_CHECKPOINT, CHECKPOINT) and architecture is None:
@@ -165,7 +189,7 @@ def load_checkpoint(path, device="cpu", *, allowed_schemas=CHECKPOINT_SCHEMAS):
     else:
         raise ValueError("Unsupported checkpoint schema or experimental architecture")
     if (checkpoint.get("model_version") != expected_version or model_config != expected_model
-            or checkpoint.get("tokenizer") != TOKENIZER):
+            or (schema != CONVERSATION_CHECKPOINT and tokenizer_identity != TOKENIZER)):
         raise ValueError("Unsupported checkpoint, model or tokenizer configuration")
     steps, history = checkpoint["step"], checkpoint["history"]
     if type(steps) is not int or steps < 1 or [r["step"] for r in history] != list(
@@ -199,23 +223,33 @@ def load_checkpoint(path, device="cpu", *, allowed_schemas=CHECKPOINT_SCHEMAS):
 
 
 def train(catalog, release, output, steps, device, config, resume=None, checkpoint_every=1,
-          *, precision="fp32", architecture=None, context_length=None):
+          *, precision="fp32", architecture=None, context_length=None, tokenizer_path=None):
     device = torch.device(device)
     if device.type == "cuda":
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     check_precision(precision, device)
     if architecture is None and context_length is not None:
         raise ValueError("A custom context length requires an experimental architecture")
-    model_config = (MODEL if architecture is None else
-                    experiment_config(architecture, 128 if context_length is None else context_length))
+    conversation = architecture == "conversation"
+    if conversation != (tokenizer_path is not None):
+        raise ValueError("Only the conversation architecture uses an explicit tokenizer artifact")
+    tokenizer = load_tokenizer(tokenizer_path) if conversation else None
+    if conversation:
+        model_config = conversation_config(tokenizer.vocab_size, 256 if context_length is None else context_length)
+    else:
+        model_config = (MODEL if architecture is None else
+                        experiment_config(architecture, 128 if context_length is None else context_length))
     experimental = architecture is not None
-    artifact_version = "0.4" if experimental else "0.2"
+    artifact_version = "0.5" if conversation else "0.4" if experimental else "0.2"
     verify_baseline()
     if type(steps) is not int or steps < 1:
         raise ValueError("steps must be a positive integer")
     if type(checkpoint_every) is not int or checkpoint_every < 1:
         raise ValueError("checkpoint_every must be a positive integer")
     dataset = load_release(catalog, release)
+    if conversation and (tokenizer.dataset_version != release.stem or
+                         tokenizer.training_fingerprint != training_fingerprint(training_rows(dataset))):
+        raise ValueError("Tokenizer does not match the authorized training split")
     torch.use_deterministic_algorithms(True)
     random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -225,10 +259,14 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
                 "model_version": EXPERIMENT_VERSION if experimental else MODEL_VERSION,
                 "model_config": model_config,
                 "run_config": asdict(config), "dataset_version": release.stem,
-                "tokenizer": TOKENIZER, "code_revision": revision(), "environment": env,
+                "tokenizer": TOKENIZER, "code_revision": revision(conversation), "environment": env,
                 "precision": precision}
     if experimental:
         identity["architecture"] = architecture
+    if conversation:
+        identity.update(schema=CONVERSATION_CHECKPOINT, model_version=CONVERSATION_VERSION,
+                        tokenizer=tokenizer.identity(), conversation_format=tokenizer.format_identity(),
+                        training_stage="base_pretraining")
     start, history = 0, []
     if resume is None:
         model = new_model(model_config).to(device)
@@ -243,7 +281,7 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
     if steps <= start:
         raise ValueError("Target step must be greater than saved step")
     train_windows = [pair for row in dataset["documents"] if row["split"] == "train"
-                     for pair in windows(row["text"], model_config["context_length"])]
+                     for pair in document_windows(row["text"], model_config["context_length"], tokenizer)]
     validation = [row for row in dataset["documents"] if row["split"] == "validation"]
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
                                   weight_decay=config.weight_decay, foreach=False)
@@ -266,7 +304,8 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
     train_seconds = validation_seconds = checkpoint_seconds = 0.0
     started = time.perf_counter()
     cpu_start = time.process_time()
-    trained_bytes = 0
+    trained_targets = 0
+    target_unit = "tokens" if conversation else "bytes"
     for step in range(start + 1, steps + 1):
         step_start = time.perf_counter()
         indices = torch.randint(len(train_windows), (config.batch_size,), generator=sampler)
@@ -286,21 +325,21 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
         elapsed = time.perf_counter() - step_start
         train_seconds += elapsed
         count = (y != -100).sum().item()
-        trained_bytes += count
+        trained_targets += count
         record = {"step": step, "train_loss": loss.item(), "gradient_norm": norm.item(),
-                  "train_bytes": count, "train_seconds": elapsed, "bytes_per_second": count / elapsed}
+                  f"train_{target_unit}": count, "train_seconds": elapsed, f"{target_unit}_per_second": count / elapsed}
         history.append(record)
         if step % checkpoint_every and step != steps:
             continue
         validation_start = time.perf_counter()
-        record["validation"] = evaluate(model, validation, device, config.batch_size)
+        record["validation"] = evaluate(model, validation, device, config.batch_size, tokenizer=tokenizer)
         validation_seconds += time.perf_counter() - validation_start
         checkpoint_start = time.perf_counter()
         elapsed_run = time.perf_counter() - started
         hardware = {"segment_wall_seconds": elapsed_run,
                     "segment_process_cpu_seconds": time.process_time() - cpu_start,
-                    "segment_training_target_bytes": trained_bytes,
-                    "segment_end_to_end_bytes_per_second": trained_bytes / elapsed_run,
+                    f"segment_training_target_{target_unit}": trained_targets,
+                    f"segment_end_to_end_{target_unit}_per_second": trained_targets / elapsed_run,
                     "process_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024}
         if device.type == "cuda":
             hardware.update(gpu_peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
@@ -320,9 +359,11 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
             publish(path, lambda stream: torch.save(checkpoint, stream))
         checkpoint_seconds += time.perf_counter() - checkpoint_start
     write_json(output / f"metrics.{artifact_version}.json", {
-        "schema": "goxlm-segment-metrics-0.4.0" if experimental else "goxlm-segment-metrics-0.2.2", "precision": precision,
+        "schema": ("goxlm-segment-metrics-0.5.0" if conversation else
+                   "goxlm-segment-metrics-0.4.0" if experimental else "goxlm-segment-metrics-0.2.2"),
+        "precision": precision,
         "first_step": start + 1, "last_step": steps, "optimizer_updates": updates - start,
-        "training_target_bytes": trained_bytes, "training_seconds": train_seconds,
+        f"training_target_{target_unit}": trained_targets, "training_seconds": train_seconds,
         "validation_seconds": validation_seconds, "checkpoint_seconds": checkpoint_seconds,
         "wall_seconds": time.perf_counter() - started,
         "hardware": hardware,

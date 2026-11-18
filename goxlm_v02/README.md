@@ -147,3 +147,6 @@ The report excludes the first four updates from throughput and step
 latency. Peak allocator statistics cover the segment through validation,
 while validation, save, and verified CPU load durations are separate.
 Keep any saved report in an ignored local runs directory.
+
+See [Conversation model foundation](CONVERSATION_FOUNDATION.md) for the
+versioned local byte BPE workflow and bounded synthetic validation.

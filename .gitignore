@@ -1,5 +1,7 @@
 # Private corpora, provenance, and review buffers
 /research/
+/tokenizers/
+/conversation-data/
 /data/
 /checkpoints/
 /datasets/
