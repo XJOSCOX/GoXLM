@@ -1,12 +1,13 @@
 """Loopback API and a single cancellable inference slot."""
 from dataclasses import dataclass, field
 import json
+import math
 from threading import Event, Lock
 import time
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
-from anyio import CancelScope
+from anyio import CancelScope, create_task_group
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import torch
 
-from .engine import (CheckpointError, Completion, MAX_NEW_TOKENS, ModelId, ModelRegistry,
+from .engine import (CheckpointError, Completion, GenerationCancelled, MAX_NEW_TOKENS, ModelId, ModelRegistry,
                      model_info, prompt_tokens, resolve_device)
 
 ORIGINS = ("http://localhost:13000", "http://127.0.0.1:13000")
@@ -30,6 +31,8 @@ class GenerateRequest(BaseModel):
     prompt: Annotated[str, Field(strict=True, min_length=1, max_length=256)]
     temperature: Annotated[float, Field(strict=True, ge=0.05, le=2.0)] = 0.8
     top_k: Annotated[int, Field(strict=True, ge=1, le=2048)] = 40
+    strategy: Literal["full", "cached"] = "full"
+    seed: Annotated[int, Field(strict=True, ge=0, le=2**32 - 1)] | None = None
     max_new_tokens: Annotated[int, Field(strict=True, ge=1, le=MAX_NEW_TOKENS)] = 64
 
 
@@ -73,11 +76,30 @@ class GenerationResponse(StreamingResponse):
         self.run = run
 
     async def __call__(self, scope, receive, send):
+        disconnected = False
+
+        async def monitor():
+            nonlocal disconnected
+            while True:
+                if (await receive())["type"] == "http.disconnect":
+                    disconnected = True
+                    self.run.cancelled.set()
+                    return
+
+        async def output(message):
+            if not disconnected:
+                await send(message)
+
         try:
-            await super().__call__(scope, receive, send)
+            async with create_task_group() as tasks:
+                tasks.start_soon(monitor)
+                try:
+                    await self.stream_response(output)
+                except OSError:
+                    self.run.cancelled.set()
+                finally:
+                    tasks.cancel_scope.cancel()
         finally:
-            # StreamingResponse cancels its iterator on disconnect. AnyIO's worker
-            # waits for the in-flight model operation before the slot is released.
             try:
                 with CancelScope(shield=True):
                     await self.body_iterator.aclose()
@@ -126,7 +148,7 @@ def create_app(settings, *, registry_factory=ModelRegistry):
 
     @app.get("/api/models")
     async def models():
-        return {"models": [model_info(entry) for entry in registry.entries.values()],
+        return {"models": [registry.info(entry) for entry in registry.entries.values()],
                 "device": {"type": device.torch_device.type, "label": device.label,
                            "fallback": device.fallback}}
 
@@ -153,35 +175,63 @@ def create_app(settings, *, registry_factory=ModelRegistry):
         if run is None:
             return error(409, "Another generation is active. Wait for it to finish or stop it.")
 
+        acquired = time.perf_counter()
+
         async def stream():
-            yield event("start", generation_id=str(run.id), prompt_tokens=len(tokens))
+            completion = None
+            load_ms = None
+            stamps = []
             count = 0
+            rate = 0
+            yield event("start", generation_id=str(run.id), prompt_tokens=len(tokens),
+                        strategy=body.strategy)
             try:
                 if run.cancelled.is_set():
-                    yield event("done", generated_tokens=0, tokens_per_second=0, cancelled=True)
-                    return
-                model = await run_in_threadpool(registry.get, entry)
-                completion = Completion(model, tokens, device.torch_device, body.temperature, body.top_k)
-                started = time.perf_counter()
-                for count in range(1, body.max_new_tokens + 1):
+                    raise GenerationCancelled
+                load_start = time.perf_counter()
+                with CancelScope(shield=True):
+                    model = await run_in_threadpool(registry.get, entry, run.cancelled)
+                load_ms = (time.perf_counter() - load_start) * 1000
+                if run.cancelled.is_set():
+                    raise GenerationCancelled
+                completion = Completion(model, tokens, device.torch_device, body.temperature,
+                                        body.top_k, body.strategy, body.seed)
+                for _ in range(body.max_new_tokens):
                     if run.cancelled.is_set():
-                        count -= 1
                         break
-                    text = await run_in_threadpool(completion.step)
-                    rate = count / max(time.perf_counter() - started, 1e-9)
+                    with CancelScope(shield=True):
+                        text = await run_in_threadpool(completion.step)
+                    stamp = time.perf_counter()
+                    count += 1
+                    stamps.append(stamp)
+                    rate = (count - 1) / max(stamp - stamps[0], 1e-9) if count > 1 else 0
                     yield event("delta", text=text, generated_tokens=count, tokens_per_second=rate)
-                rate = count / max(time.perf_counter() - started, 1e-9)
                 tail = completion.finish()
                 if tail:
                     yield event("delta", text=tail, generated_tokens=count, tokens_per_second=rate)
-                yield event("done", generated_tokens=count, tokens_per_second=rate,
-                            cancelled=run.cancelled.is_set())
+            except GenerationCancelled:
+                pass
             except CheckpointError as exc:
                 yield event("error", message=str(exc))
+                return
             except torch.OutOfMemoryError:
                 yield event("error", message="The GPU ran out of memory during inference.")
+                return
             except Exception:
                 yield event("error", message="Local inference failed. Check the service and model settings.")
+                return
+            finally:
+                rebuilds = 0
+                if completion is not None:
+                    rebuilds = completion.cache.rebuilds if completion.cache is not None else 0
+                    completion.close()
+            intervals = sorted((b - a) * 1000 for a, b in zip(stamps, stamps[1:]))
+            yield event("done", generated_tokens=count, cancelled=run.cancelled.is_set(),
+                        tokens_per_second=(count - 1) / max(stamps[-1] - stamps[0], 1e-9)
+                        if intervals else 0,
+                        first_token_ms=(stamps[0] - acquired) * 1000 if stamps else None,
+                        load_ms=load_ms, p95_token_ms=intervals[math.ceil(.95 * len(intervals)) - 1]
+                        if intervals else None, cache_rebuilds=rebuilds)
 
         return GenerationResponse(stream(), slot, run)
 

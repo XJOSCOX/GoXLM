@@ -1,6 +1,8 @@
 import { ArrowUpRight, Atom, CodeXml, MessageSquare, Moon, Orbit, Plus, Sigma, Sun, X } from "lucide-react";
 
-export type Message = { id: string; role: "user" | "assistant"; text: string; model?: string };
+export type Message = { id: string; role: "user" | "assistant"; text: string; model?: string; group?: string;
+  metrics?: { first: number | null; p95: number | null; rate: number; rebuilds: number };
+  stopped?: boolean };
 export type Conversation = { id: string; title: string; messages: Message[] };
 
 type RailProps = {
@@ -111,16 +113,39 @@ export function MessageList({ messages, busy }: { messages: Message[]; busy: boo
           <p className="text-[15px] leading-6 wrap-anywhere whitespace-pre-wrap">{message.text}</p>
         </div>
       </div>;
-      return <div key={message.id} className="mb-8 flex items-start gap-3 sm:gap-4">
-        <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--accent-surface)] text-[var(--accent)]"><Orbit size={17} /></div>
-        <div className="min-w-0 pt-1">
-          <div className="mb-2 text-sm font-semibold">{message.model ?? "GoXLM"}</div>
-          <p className="text-[15px] leading-[1.75] wrap-anywhere whitespace-pre-wrap">
-            {message.text || (generating ? "Waiting for text…" : "No completion returned.")}
-            {generating && message.text && <span className="ml-1 inline-block h-3 w-[2px] animate-pulse bg-[var(--accent)]" aria-hidden />}
-          </p>
-        </div>
-      </div>;
+      if (message.group) {
+        if (messages[i - 1]?.group === message.group) return null;
+        const pair = messages.slice(i, i + 2).filter((item) => item.group === message.group);
+        return <div key={message.id} aria-label="Model comparison" className="mb-8 grid gap-3 sm:grid-cols-2">
+          {pair.map((item) => <article key={item.id}
+            className="min-w-0 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4">
+            <Assistant message={item} waiting={busy} />
+          </article>)}
+        </div>;
+      }
+      return <div key={message.id} className="mb-8"><Assistant message={message} waiting={generating} /></div>;
     })}
+  </div>;
+}
+
+function Assistant({ message, waiting }: { message: Message; waiting: boolean }) {
+  const metrics = message.metrics;
+  return <div className="flex items-start gap-3">
+    <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--accent-surface)] text-[var(--accent)]">
+      <Orbit size={17} />
+    </div>
+    <div className="min-w-0 pt-1">
+      <div className="mb-2 text-sm font-semibold">{message.model ?? "GoXLM"}</div>
+      <p className="text-[15px] leading-[1.75] wrap-anywhere whitespace-pre-wrap">
+        {message.text || (message.stopped ? "Stopped." : waiting && !metrics ? "Waiting for text…" : "No completion returned.")}
+      </p>
+      {metrics && <p className="mt-3 text-xs text-[var(--muted)]">
+        {metrics.first !== null && <>First token {metrics.first.toFixed(1)} ms · </>}
+        {metrics.rate.toFixed(1)} tok/s
+        {metrics.p95 !== null && <> · p95 {metrics.p95.toFixed(1)} ms</>}
+        {metrics.rebuilds > 0 && <> · {metrics.rebuilds} window rebuilds</>}
+        {message.stopped && <> · Stopped</>}
+      </p>}
+    </div>
   </div>;
 }

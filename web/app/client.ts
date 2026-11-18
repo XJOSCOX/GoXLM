@@ -8,6 +8,11 @@ export type Model = {
   prefix_tokens: number;
   vocab_size: number;
   max_new_tokens: number;
+  tokenizer_version: string;
+  status: "loaded" | "validated" | "unverified";
+  checkpoint_schema?: string;
+  checkpoint_step?: number;
+  training_precision?: string;
 };
 export type ModelList = {
   models: Model[];
@@ -16,7 +21,9 @@ export type ModelList = {
 export type GenerationEvent =
   | { type: "start"; generation_id: string; prompt_tokens: number }
   | { type: "delta"; text: string; generated_tokens: number; tokens_per_second: number }
-  | { type: "done"; generated_tokens: number; tokens_per_second: number; cancelled: boolean }
+  | { type: "done"; generated_tokens: number; tokens_per_second: number; cancelled: boolean;
+      first_token_ms: number | null; p95_token_ms: number | null; load_ms: number | null;
+      cache_rebuilds: number }
   | { type: "error"; message: string };
 
 export async function requireSuccess(response: Response) {

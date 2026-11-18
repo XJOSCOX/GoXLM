@@ -6,7 +6,7 @@ import { API, readEvents, requireSuccess, type ModelList } from "./client";
 import { ConversationRail, EmptyWorkspace, MessageList, type Conversation } from "./workspace-ui";
 
 type Theme = "dark" | "black";
-type Run = { id: string; controller: AbortController };
+type Run = { id: string; controller: AbortController; stopRequested: boolean };
 
 const STORAGE = "goxlm.workspace.v1";
 const integer = (value: number, max: number) => Number.isInteger(value) && value >= 1 && value <= max;
@@ -20,6 +20,8 @@ export default function Home() {
   const [service, setService] = useState<ModelList | null>(null);
   const [connecting, setConnecting] = useState(true);
   const [modelId, setModelId] = useState("");
+  const [compareId, setCompareId] = useState("");
+  const [strategy, setStrategy] = useState<"full" | "cached">("full");
   const [draft, setDraft] = useState("");
   const [temperature, setTemperature] = useState("0.8");
   const [topK, setTopK] = useState("40");
@@ -85,14 +87,19 @@ export default function Home() {
 
   const active = conversations.find((item) => item.id === selected);
   const model = service?.models.find((item) => item.id === modelId);
-  const promptTokens = draft.length ? new TextEncoder().encode(draft).length + (model?.prefix_tokens ?? 0) : 0;
+  const comparison = service?.models.find((item) => item.id === compareId && item.id !== modelId);
+  const rawTokens = new TextEncoder().encode(draft).length;
+  const prefix = model?.prefix_tokens ?? 0;
+  const promptTokens = draft.length ? rawTokens + prefix : 0;
   const context = model?.context_length ?? 128;
-  const fits = promptTokens <= context;
+  const fits = promptTokens <= context && (!comparison ||
+    rawTokens + comparison.prefix_tokens <= comparison.context_length);
   const temp = Number(temperature);
   const k = Number(topK);
   const max = Number(maxTokens);
   const settingsValid = temp >= 0.05 && temp <= 2 && integer(k, model?.vocab_size ?? 256)
-    && integer(max, model?.max_new_tokens ?? 256);
+    && integer(max, model?.max_new_tokens ?? 256) && (!comparison ||
+      (integer(k, comparison.vocab_size) && integer(max, comparison.max_new_tokens)));
   const canSubmit = Boolean(model && !busy && draft.trim() && fits && settingsValid);
 
   useEffect(() => {
@@ -126,9 +133,11 @@ export default function Home() {
     e?.preventDefault();
     if (!canSubmit || !model || current.current) return;
     const conversationId = active?.id ?? crypto.randomUUID();
-    const assistantId = crypto.randomUUID();
+    const participants = comparison ? [model, comparison] : [model];
+    const assistantIds = participants.map(() => crypto.randomUUID());
+    const group = comparison ? crypto.randomUUID() : undefined;
     const input = draft;
-    const run = { id: crypto.randomUUID(), controller: new AbortController() };
+    const run = { id: crypto.randomUUID(), controller: new AbortController(), stopRequested: false };
     current.current = run;
 
     setConversations((items) => {
@@ -139,7 +148,9 @@ export default function Home() {
       return [{ id: conversationId, title, messages: [
         ...(previous?.messages ?? []),
         { id: crypto.randomUUID(), role: "user", text: input },
-        { id: assistantId, role: "assistant", text: "", model: model.label },
+        ...participants.map((participant, index) => ({
+          id: assistantIds[index], role: "assistant" as const, text: "", model: participant.label, group,
+        })),
       ] }, ...items.filter((item) => item.id !== conversationId)];
     });
     setSelected(conversationId);
@@ -151,34 +162,47 @@ export default function Home() {
     setError("");
 
     try {
-      const stream = await requireSuccess(await fetch(`${API}/generate`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ generation_id: run.id, model_id: model.id, prompt: input,
-          temperature: temp, top_k: k, max_new_tokens: max }),
-        signal: run.controller.signal,
-      }));
-      let finished = false;
-      for await (const event of readEvents(stream)) {
-        if (event.type === "error") throw new Error(event.message);
-        if (event.type === "start") setPhase("Generating");
-        if (event.type === "delta" || event.type === "done") {
-          setGenerated(event.generated_tokens);
-          setRate(event.tokens_per_second);
+      for (const [index, participant] of participants.entries()) {
+        if (run.stopRequested) break;
+        const assistantId = assistantIds[index];
+        if (index) run.id = crypto.randomUUID();
+        setGenerated(0);
+        setRate(0);
+        setPhase(participants.length === 1 ? "Starting" : `Starting ${index + 1} of 2`);
+        const response = await requireSuccess(await fetch(`${API}/generate`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ generation_id: run.id, model_id: participant.id, prompt: input,
+            temperature: temp, top_k: k, max_new_tokens: max, strategy, seed: group ? 42 : null }),
+          signal: run.controller.signal,
+        }));
+        let finished = false;
+        for await (const event of readEvents(response)) {
+          if (event.type === "error") throw new Error(event.message);
+          if (event.type === "start" && !run.stopRequested) {
+            setPhase(participants.length === 1 ? "Generating" : `Generating ${index + 1} of 2`);
+          }
+          if (event.type === "delta" || event.type === "done") {
+            setGenerated(event.generated_tokens);
+            setRate(event.tokens_per_second);
+            const update = event;
+            setConversations((items) => items.map((item) => item.id !== conversationId ? item : ({
+              ...item, messages: item.messages.map((message) => message.id !== assistantId ? message :
+                update.type === "delta" ? { ...message, text: message.text + update.text } :
+                  { ...message, metrics: { first: update.first_token_ms, p95: update.p95_token_ms,
+                    rate: update.tokens_per_second, rebuilds: update.cache_rebuilds },
+                    stopped: update.cancelled }),
+            })));
+          }
+          if (event.type === "done") {
+            if (event.cancelled) run.stopRequested = true;
+            finished = true;
+          }
         }
-        if (event.type === "delta" && event.text) {
-          setConversations((items) => items.map((item) => item.id !== conversationId ? item : ({
-            ...item, messages: item.messages.map((message) => message.id !== assistantId ? message :
-              { ...message, text: message.text + event.text }),
-          })));
-        }
-        if (event.type === "done") {
-          setPhase(event.cancelled ? "Stopped" : "Complete");
-          finished = true;
-        }
+        if (!finished) throw new Error("The generation stream ended early. Retry the prompt.");
       }
-      if (!finished) throw new Error("The generation stream ended early. Retry the prompt.");
+      setPhase(run.stopRequested ? "Stopped" : "Complete");
     } catch (err) {
-      if (run.controller.signal.aborted) setPhase("Stopped");
+      if (run.controller.signal.aborted || run.stopRequested) setPhase("Stopped");
       else {
         setPhase("Failed");
         setError(err instanceof Error && err.message !== "Failed to fetch"
@@ -188,6 +212,8 @@ export default function Home() {
       if (current.current === run) {
         current.current = null;
         setBusy(false);
+        void fetch(`${API}/models`, { cache: "no-store" }).then(requireSuccess)
+          .then((response) => response.json()).then(setService).catch(() => {});
       }
       composer.current?.focus();
     }
@@ -196,6 +222,7 @@ export default function Home() {
   async function stop() {
     const run = current.current;
     if (!run) return;
+    run.stopRequested = true;
     setPhase("Stopping");
     try {
       await requireSuccess(await fetch(`${API}/generations/${run.id}/cancel`, { method: "POST" }));
@@ -230,7 +257,7 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
-            {model && <span className="hidden items-center gap-1.5 text-xs text-[var(--muted)] lg:flex">
+            {model && <span title={`Tokenizer: ${model.tokenizer_version}. ${model.checkpoint_schema ?? "Checkpoint verified on first use"}.`} className="hidden items-center gap-1.5 text-xs text-[var(--muted)] lg:flex">
               <Cpu size={14} /> {(model.parameter_count / 1_000_000).toFixed(2)}M params
               <span className="px-1 text-[var(--quiet)]">·</span> {model.context_length} context
             </span>}
@@ -270,6 +297,27 @@ export default function Home() {
               {label}<input type="number" value={value} onChange={(e) => set(e.target.value)} min={min} max={max} step={step}
                 disabled={busy} className="mt-1 block w-full rounded-md border border-[var(--line)] bg-[var(--canvas)] px-2 py-1.5 text-[var(--text)]" />
             </label>)}
+            <label className="col-span-3 text-xs text-[var(--muted)] sm:col-span-1">
+              Decode path
+              <select value={strategy} disabled={busy} onChange={(e) => setStrategy(e.target.value === "cached" ? "cached" : "full")}
+                className="mt-1 block w-full rounded-md border border-[var(--line)] bg-[var(--canvas)] px-2 py-1.5 text-[var(--text)]">
+                <option value="full">Full forward</option><option value="cached">KV cache</option>
+              </select>
+            </label>
+            <label className="col-span-3 text-xs text-[var(--muted)] sm:col-span-2">
+              Compare with
+              <select value={comparison?.id ?? ""} disabled={busy || (service?.models.length ?? 0) < 2}
+                onChange={(e) => setCompareId(e.target.value)}
+                className="mt-1 block w-full rounded-md border border-[var(--line)] bg-[var(--canvas)] px-2 py-1.5 text-[var(--text)]">
+                <option value="">{(service?.models.length ?? 0) < 2 ? "Add a second allowlisted model" : "Single model"}</option>
+                {service?.models.filter((item) => item.id !== modelId).map((item) =>
+                  <option key={item.id} value={item.id}>{item.label} · {item.context_length} context</option>)}
+              </select>
+            </label>
+            {comparison && <p className="col-span-3 text-xs text-[var(--muted)]">Runs sequentially with matching settings and seed 42.</p>}
+            {model && <p className="col-span-3 text-xs text-[var(--muted)]">
+              {model.tokenizer_version} · {model.status}{model.checkpoint_step != null && ` · step ${model.checkpoint_step} · trained ${model.training_precision}`}
+            </p>}
             {!settingsValid && <p className="col-span-3 text-xs text-[var(--error)]">Enter values within the displayed ranges.</p>}
           </fieldset>}
           <form onSubmit={(e) => void send(e)} className="composer rounded-xl border border-[var(--line)] bg-[var(--panel)] p-3 shadow-[0_8px_24px_#0003] sm:p-3.5">
@@ -297,6 +345,10 @@ export default function Home() {
                   </button>}
             </div>
           </form>
+          {prefix > 0 && <p className="mt-1 px-1 text-xs text-[var(--muted)]">Prompt budget includes a {prefix}-token model prefix.</p>}
+          {draft.length > 0 && fits && promptTokens + max > context && <p className="mt-1 px-1 text-xs text-[var(--muted)]">
+            Generation may roll over the {context}-token window and discard earlier input.
+          </p>}
           {!fits && <p role="alert" className="mt-2 text-xs text-[var(--error)]">Shorten the prompt to stay within the model context.</p>}
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-[var(--muted)]">
             <span>Only the current input is sent. History stays in this browser.</span>
