@@ -101,3 +101,9 @@ of sustained training.
   Test remembered context with an ablation that removes the relevant history.
   Check privacy and consent lifecycle tests before enabling any contribution
   feature.
+
+## Live information and memory roadmap
+
+See [the live information roadmap](LIVE_INFORMATION_ROADMAP.md) for opt-in
+retrieval, request routing, source freshness, persistent memory, and reviewed
+training releases.
