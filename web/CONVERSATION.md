@@ -101,3 +101,14 @@ of sustained training.
   Test remembered context with an ablation that removes the relevant history.
   Check privacy and consent lifecycle tests before enabling any contribution
   feature.
+
+## Future instruction adapter acceptance
+
+The future versioned instruction adapter must check the checkpoint schema
+and training stage, exact tokenizer artifact SHA-256, role IDs, formatter
+version and context. Its allowlist entry should bind an independent
+conversation evaluation result to that exact checkpoint hash. Existing
+completion endpoints keep their existing model eligibility. Prototype
+tests should cover full-turn trimming, cancellation, end-of-turn stop,
+partial UTF-8, and synthetic rejection of base checkpoints before a chat
+route is authorized.

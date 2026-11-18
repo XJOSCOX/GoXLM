@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import torch
 
-from goxlm_review.dialogue import Draft, PILOT_SCHEMA, SCORE_NAMES, audit, seal, stage
+from goxlm_review.dialogue import (Draft, PILOT_SCHEMA, SCORE_NAMES, audit, record_quality, seal, stage)
 from goxlm_review.ledger import status
 from goxlm_review.staging import init
 from goxlm_v02 import test_v02 as fixtures
@@ -121,6 +121,15 @@ def draft_value(origin):
     return value
 
 
+def quality_value(raw, **overrides):
+    return {"draft_sha256": digest(raw), "reviewer_ref": "fixture-review", "review_date": "2026-11-18",
+            "decision": "accepted", "scores": {key: 2 for key in SCORE_NAMES},
+            "naturalness_note": "Synthetic test rubric.", "accuracy_note": "Fixture has no factual claim.",
+            "fact_check_refs": [], "followup_note": "Single-turn fixture.",
+            "privacy_note": "No identifying facts in fixture.", "duplicate_note": "Independent fixture.",
+            **overrides}
+
+
 class DialogueTests(unittest.TestCase):
     def test_origin_hash_context_and_duplicate_checks(self):
         tokenizer = ByteBPE("0" * 64, "0" * 64, 259, ())
@@ -143,7 +152,8 @@ class DialogueTests(unittest.TestCase):
             root = Path(directory)
             store = root / "reviews"
             init(store, ["fixture"])
-            record, review, index = (root / name for name in ("draft.json", "quality.json", "index.json"))
+            record, decision, review, index = (root / name for name in
+                                                ("draft.json", "decision.json", "quality.json", "index.json"))
             for origin in ("synthetic", "ai_assisted"):
                 record.write_bytes(canonical(seal(draft_value(origin)).model_dump()))
                 with self.assertRaisesRegex(ValueError, "human-written"):
@@ -152,9 +162,20 @@ class DialogueTests(unittest.TestCase):
                 (root / key).write_bytes(key.encode())
             index.write_text(json.dumps({k: k for k in ("declaration", "terms")}))
             record.write_bytes(canonical(seal(draft_value("human_written")).model_dump()))
-            quality = {"draft_sha256": digest(record.read_bytes()), "reviewer_ref": "fixture-review",
-                       "review_date": "2026-11-18", "scores": {key: 2 for key in SCORE_NAMES}}
-            review.write_bytes(canonical(quality))
+            quality = quality_value(record.read_bytes())
+            decision.write_bytes(canonical(quality))
+            with patch("goxlm_review.dialogue.local_operator", return_value="fixture"), \
+                    patch("goxlm_review.dialogue.sys.stdin.isatty", return_value=True), \
+                    patch("builtins.input", return_value=quality["draft_sha256"]):
+                record_quality(store, record, decision, review)
+            envelope = json.loads(review.read_bytes())
+            bad_review = root / "corrupt-quality.json"
+            envelope["quality"]["review"]["privacy_note"] = "Tampered"
+            bad_review.write_bytes(canonical(envelope))
+            with self.assertRaisesRegex(ValueError, "integrity"):
+                stage(store, record, bad_review, index, root)
+            with self.assertRaisesRegex(ValueError, "recorded quality"):
+                stage(store, record, decision, index, root)
             (root / "terms").write_bytes(b"mismatch")
             with self.assertRaisesRegex(ValueError, "Evidence hash mismatch"):
                 stage(store, record, review, index, root)
@@ -164,3 +185,36 @@ class DialogueTests(unittest.TestCase):
             self.assertIn(result["case_id"], cases)
             self.assertEqual([], events)
             self.assertEqual({}, state)
+
+
+    def test_privacy_and_cross_batch_overlap_report_do_not_echo_content(self):
+        tokenizer = ByteBPE("0" * 64, "0" * 64, 259, ())
+        value = draft_value("synthetic")
+        value["turns"][0]["assistant"]["text"] = "Try placeholder@example.invalid for this fixture."
+        flagged = seal(value)
+        counterpart = seal({**value, "record_id": "previous"})
+        stats = audit([flagged], tokenizer, against=[counterpart])
+        self.assertEqual({"test-record.r1": ["email"]}, stats["privacy_flags"])
+        self.assertEqual(1, len(stats["overlap_findings"]))
+        self.assertNotIn("placeholder", str(stats))
+
+    def test_quality_acceptance_requires_interactive_hash_and_bound_facts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            draft, decision, output = (root / name for name in ("draft.json", "decision.json", "quality.json"))
+            value = dict(draft_value("human_written"), task_class="basic_stem")
+            draft.write_bytes(canonical(seal(value).model_dump()))
+            grade = quality_value(draft.read_bytes())
+            decision.write_bytes(canonical(grade))
+            with patch("goxlm_review.dialogue.local_operator", return_value="fixture"):
+                with patch("goxlm_review.dialogue.sys.stdin.isatty", return_value=False):
+                    with self.assertRaisesRegex(ValueError, "interactive"):
+                        record_quality(root, draft, decision, output)
+                with patch("goxlm_review.dialogue.sys.stdin.isatty", return_value=True):
+                    with self.assertRaisesRegex(ValueError, "Fact-check"):
+                        record_quality(root, draft, decision, output)
+                    decision.write_bytes(canonical(dict(grade, decision="hold")))
+                    with patch("builtins.input", return_value="a" * 64):
+                        with self.assertRaisesRegex(ValueError, "did not match"):
+                            record_quality(root, draft, decision, output)
+            self.assertFalse(output.exists())
