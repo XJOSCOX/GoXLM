@@ -10,7 +10,7 @@ type RailProps = {
   open: boolean;
   connected: boolean;
   device?: string;
-  theme: "dark" | "light";
+  theme: "dark" | "black";
   onClose: () => void;
   onNew: () => void;
   onSelect: (id: string) => void;
@@ -23,10 +23,10 @@ export function ConversationRail(props: RailProps) {
   return <>
     {open && <button type="button" aria-label="Close conversation sidebar" onClick={onClose}
       className="fixed inset-0 z-10 bg-black/50 md:hidden" />}
-    <aside aria-label="Conversations" className={`z-20 flex h-full w-[258px] shrink-0 flex-col border-r border-[var(--line)] bg-[var(--rail)] px-4 py-5
+    <aside aria-label="Conversations" className={`z-20 flex h-full w-[248px] shrink-0 flex-col border-r border-[var(--line)] bg-[var(--rail)] px-4 py-5
       ${open ? "fixed inset-y-0 left-0" : "hidden"} md:static md:flex`}>
       <div className="mb-7 flex items-center gap-3 px-1">
-        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--accent)] text-[var(--accent-ink)]">
+        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-[var(--line)] bg-[var(--accent-surface)] text-[var(--text)]">
           <Orbit size={23} strokeWidth={1.9} />
         </div>
         <div className="min-w-0 flex-1">
@@ -38,7 +38,7 @@ export function ConversationRail(props: RailProps) {
       </div>
 
       <button type="button" onClick={onNew} disabled={busy}
-        className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--accent-surface)] py-3 text-sm font-semibold text-[var(--accent)] transition-colors hover:bg-[var(--panel-hover)] disabled:opacity-50">
+        className="flex w-full items-center justify-start gap-2.5 rounded-lg border border-[var(--line)] bg-[var(--accent-surface)] px-3 py-2.5 text-sm font-semibold text-[var(--accent)] transition-colors hover:bg-[var(--panel-hover)] disabled:opacity-50">
         <Plus size={17} /> New conversation
       </button>
 
@@ -64,7 +64,7 @@ export function ConversationRail(props: RailProps) {
         </div>
         <button type="button" onClick={onTheme}
           className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2.5 text-left text-sm text-[var(--muted)] hover:bg-[var(--panel-hover)]">
-          {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />} {theme === "dark" ? "Light mode" : "Dark mode"}
+          {theme === "dark" ? <Moon size={16} /> : <Sun size={16} />} {theme === "dark" ? "True black" : "Graphite mode"}
         </button>
       </div>
     </aside>
@@ -78,19 +78,18 @@ const ideas = [
 ];
 
 export function EmptyWorkspace({ onPrompt }: { onPrompt: (prompt: string) => void }) {
-  return <div className="relative isolate flex min-h-[370px] flex-1 items-center justify-center px-4 py-7 sm:px-8">
-    <div className="hero-halo pointer-events-none absolute top-1/2 left-1/2 -z-10 h-[360px] w-full max-w-[730px] -translate-x-1/2 -translate-y-1/2 opacity-50" />
-    <div className="w-full max-w-[702px]">
-      <div className="mx-auto mb-5 grid h-[60px] w-[60px] place-items-center rounded-[18px] border border-[var(--line)] bg-[var(--accent-surface)] text-[var(--accent)]">
-        <Orbit size={31} strokeWidth={1.65} />
+  return <div className="flex min-h-[350px] flex-1 items-center justify-center px-4 py-8 sm:px-8">
+    <div className="w-full max-w-[796px]">
+      <div className="mb-5 grid size-11 place-items-center rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[var(--text)]">
+        <Orbit size={23} strokeWidth={1.65} />
       </div>
-      <h1 className="text-center text-[33px] font-semibold tracking-[-0.045em] sm:text-[46px]">Start with a prompt.</h1>
-      <p className="mx-auto mt-2.5 max-w-[425px] text-center text-sm leading-6 text-[var(--muted)] sm:text-[15px]">
-        GoXLM continues the text you provide. The local model is experimental and may produce incoherent results.
+      <h1 className="max-w-[680px] text-[36px] leading-[1.08] font-semibold tracking-[-0.06em] sm:text-[52px]">What should GoXLM continue?</h1>
+      <p className="mt-3 max-w-[510px] text-sm leading-6 text-[var(--muted)] sm:text-[15px]">
+        Give your local model a starting point. Experimental completions may be inaccurate or incoherent.
       </p>
-      <div className="mt-7 grid gap-2 sm:mt-9 sm:grid-cols-3 sm:gap-3">
+      <div className="mt-7 grid gap-2 sm:mt-8 sm:grid-cols-3 sm:gap-3">
         {ideas.map(({ label, text, icon: Icon }) => <button key={label} type="button" onClick={() => onPrompt(text)}
-          className="group flex min-h-[76px] flex-col rounded-xl border border-[var(--line)] bg-[var(--panel)] p-3.5 text-left transition-colors hover:bg-[var(--panel-hover)] sm:min-h-[110px]">
+          className="group flex min-h-[70px] flex-col rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3.5 text-left transition-colors hover:bg-[var(--panel-hover)] sm:min-h-[102px]">
           <span className="mb-1.5 flex w-full items-center gap-2 text-xs font-semibold text-[var(--text)]">
             <Icon size={16} className="text-[var(--accent)]" /> {label}
             <ArrowUpRight size={14} className="ml-auto text-[var(--quiet)] group-hover:text-[var(--accent)]" />
@@ -107,7 +106,7 @@ export function MessageList({ messages, busy }: { messages: Message[]; busy: boo
     {messages.map((message, i) => {
       const generating = busy && i === messages.length - 1;
       if (message.role === "user") return <div key={message.id} className="mb-8 flex justify-end">
-        <div className="max-w-[90%] rounded-2xl rounded-br-md border border-[var(--line)] bg-[var(--panel-hover)] px-4 py-3 sm:max-w-[78%]">
+        <div className="max-w-[90%] rounded-xl rounded-br-sm border border-[var(--line)] bg-[var(--panel-hover)] px-4 py-3 sm:max-w-[78%]">
           <div className="mb-1 text-xs font-semibold text-[var(--muted)]">You</div>
           <p className="text-[15px] leading-6 wrap-anywhere whitespace-pre-wrap">{message.text}</p>
         </div>
@@ -116,7 +115,7 @@ export function MessageList({ messages, busy }: { messages: Message[]; busy: boo
         <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--accent-surface)] text-[var(--accent)]"><Orbit size={17} /></div>
         <div className="min-w-0 pt-1">
           <div className="mb-2 text-sm font-semibold">{message.model ?? "GoXLM"}</div>
-          <p className="text-[15px] leading-7 wrap-anywhere whitespace-pre-wrap">
+          <p className="text-[15px] leading-[1.75] wrap-anywhere whitespace-pre-wrap">
             {message.text || (generating ? "Waiting for text…" : "No completion returned.")}
             {generating && message.text && <span className="ml-1 inline-block h-3 w-[2px] animate-pulse bg-[var(--accent)]" aria-hidden />}
           </p>

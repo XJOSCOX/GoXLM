@@ -5,7 +5,7 @@ import { AlertCircle, ArrowUp, ChevronDown, Cpu, Menu, SlidersHorizontal, Square
 import { API, readEvents, requireSuccess, type ModelList } from "./client";
 import { ConversationRail, EmptyWorkspace, MessageList, type Conversation } from "./workspace-ui";
 
-type Theme = "dark" | "light";
+type Theme = "dark" | "black";
 type Run = { id: string; controller: AbortController };
 
 const STORAGE = "goxlm.workspace.v1";
@@ -60,7 +60,7 @@ export default function Home() {
         const saved = JSON.parse(raw);
         if (Array.isArray(saved.conversations)) setConversations(saved.conversations);
         if (typeof saved.selected === "string") setSelected(saved.selected);
-        if (saved.theme === "light") setTheme("light");
+        if (saved.theme === "black") setTheme("black");
       }
     } catch {
       // The workspace still works if this browser blocks storage.
@@ -216,14 +216,14 @@ export default function Home() {
       <ConversationRail conversations={conversations} selected={selected} busy={busy} open={mobileOpen}
         connected={!!service} device={service?.device.label} theme={theme}
         onClose={() => setMobileOpen(false)} onNew={newConversation} onSelect={selectConversation}
-        onTheme={() => setTheme(theme === "dark" ? "light" : "dark")} />
+        onTheme={() => setTheme(theme === "dark" ? "black" : "dark")} />
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex min-h-[70px] shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-4 py-3 sm:px-7">
+        <header className="flex min-h-[64px] shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-4 py-3 sm:px-7">
           <div className="flex items-center gap-3">
-            <button type="button" aria-label="Open conversations" onClick={() => setMobileOpen(true)}
+            <button type="button" aria-expanded={mobileOpen} aria-label="Open conversations" onClick={() => setMobileOpen(true)}
               className="rounded-lg border border-[var(--line)] p-2.5 text-[var(--muted)] md:hidden"><Menu size={16} /></button>
             <div>
-              <div className="text-sm font-semibold tracking-tight">Text completion</div>
+              <div className="text-[13px] font-semibold tracking-tight">Text completion</div>
               <div className="mt-1 flex items-center gap-1.5 text-xs text-[var(--muted)]">
                 <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" /> Experimental
               </div>
@@ -235,9 +235,8 @@ export default function Home() {
               <span className="px-1 text-[var(--quiet)]">·</span> {model.context_length} context
             </span>}
             <label className="relative">
-              <span className="sr-only">Model</span>
-              <select value={modelId} onChange={(e) => setModelId(e.target.value)} disabled={busy || !service}
-                className="max-w-[190px] appearance-none rounded-lg border border-[var(--line)] bg-[var(--panel)] py-2 pl-3 pr-8 text-sm font-medium">
+              <select aria-label="Model" value={modelId} onChange={(e) => setModelId(e.target.value)} disabled={busy || !service}
+                className="max-w-[190px] appearance-none rounded-md border border-[var(--line)] bg-[var(--panel)] py-2 pl-3 pr-8 text-[13px] font-medium">
                 {!service && <option value="">{connecting ? "Connecting…" : "Model offline"}</option>}
                 {service?.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
               </select>
@@ -257,7 +256,7 @@ export default function Home() {
         </div>
 
         <footer className="mx-auto w-full max-w-[860px] shrink-0 px-4 pb-4 pt-3 sm:px-8 sm:pb-6">
-          {error && <div role="alert" className="mb-3 flex items-center gap-2.5 rounded-xl bg-[var(--error-bg)] px-3 py-2.5 text-sm text-[var(--error)]">
+          {error && <div role="alert" className="mb-3 flex items-center gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--error-bg)] px-3 py-2.5 text-sm text-[var(--error)]">
             <AlertCircle size={16} className="shrink-0" /><span className="flex-1">{error}</span>
             {!service && <button type="button" onClick={() => void loadModels()} className="shrink-0 font-semibold underline">Retry</button>}
           </div>}
@@ -273,7 +272,7 @@ export default function Home() {
             </label>)}
             {!settingsValid && <p className="col-span-3 text-xs text-[var(--error)]">Enter values within the displayed ranges.</p>}
           </fieldset>}
-          <form onSubmit={(e) => void send(e)} className="composer rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3 shadow-[0_12px_32px_#05090d22] sm:p-3.5">
+          <form onSubmit={(e) => void send(e)} className="composer rounded-xl border border-[var(--line)] bg-[var(--panel)] p-3 shadow-[0_8px_24px_#0003] sm:p-3.5">
             <label htmlFor="prompt" className="sr-only">Text to complete</label>
             <textarea id="prompt" ref={composer} value={draft} onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onComposerKey} maxLength={256} rows={2} disabled={busy}
