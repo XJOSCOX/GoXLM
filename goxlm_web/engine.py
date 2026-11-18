@@ -11,7 +11,7 @@ import torch
 
 from goxlm_v02.common import ROOT
 from goxlm_v02.model import MODEL, TOKENIZER, new_model
-from goxlm_v02.run import load_checkpoint
+from goxlm_v02.run import CHECKPOINT, LEGACY_CHECKPOINT, load_checkpoint
 
 from .cache import CachedDecoder
 
@@ -99,7 +99,7 @@ def legacy_model(stream):
 
 
 def versioned_model(stream):
-    model, saved = load_checkpoint(stream, "cpu")
+    model, saved = load_checkpoint(stream, "cpu", allowed_schemas=(LEGACY_CHECKPOINT, CHECKPOINT))
     return model, {"checkpoint_schema": saved["schema"],
                    "training_precision": saved.get("precision", "fp32"),
                    "checkpoint_step": saved["step"]}

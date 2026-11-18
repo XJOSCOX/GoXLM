@@ -9,6 +9,22 @@ from model.transformer import GoXLM, GoXLMConfig
 TOKENIZER = {"version": "utf8-byte-0.2.1", "vocab_size": 256, "document_prefix": 10}
 MODEL = asdict(GoXLMConfig(vocab_size=256))
 MODEL_VERSION = "goxlm-0.2-baseline"
+EXPERIMENT_VERSION = "goxlm-0.4-experimental"
+ARCHITECTURES = {
+    "baseline": (4, 4, 256),
+    "10m": (6, 6, 384),
+    "25m": (8, 8, 512),
+}
+
+
+def experiment_config(architecture, context_length=128):
+    if architecture not in ARCHITECTURES:
+        raise ValueError("Unsupported experimental architecture")
+    if type(context_length) is not int or not 32 <= context_length <= 1024:
+        raise ValueError("Experimental context length must be an integer from 32 to 1024")
+    layers, heads, width = ARCHITECTURES[architecture]
+    return {**MODEL, "context_length": context_length, "n_layers": layers,
+            "n_heads": heads, "n_embd": width}
 
 
 def encode(text):
@@ -19,8 +35,8 @@ def decode(tokens, *, errors="strict"):
     return bytes(tokens).decode("utf-8", errors=errors)
 
 
-def new_model():
-    return GoXLM(GoXLMConfig(**MODEL))
+def new_model(config=None):
+    return GoXLM(GoXLMConfig(**(MODEL if config is None else config)))
 
 
 def windows(text, context=MODEL["context_length"]):

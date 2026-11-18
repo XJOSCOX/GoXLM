@@ -106,3 +106,44 @@ PYTHON -B -m goxlm_v02.audit_tool CATALOG impact TRUSTED_CHECKPOINT_DIRECTORY
 A revocation JSON object requires `submission_sha256`, `reviewer`, `revoked_on` in YYYY-MM-DD form, `reason`, and `notice_reference`. Keep the underlying withdrawal evidence with the project records. The command publishes an immutable event through the CLI and blocks the document and normalized exact copies. Review affected families and near copies through the overlap audit and record further revocations where applicable. Always inventory the authoritative catalog and pass all relevant checkpoint locations. The impact report includes affected document IDs and splits, and reports unknown lineage separately. Treat affected checkpoint files as quarantined until reviewed. The tool preserves historical files and cannot recall copies. Older GoXLM 0.1 is outside this lineage system and retains its own hash manifest.
 
 The audit compares normalized exact text, overlapping five-token passages and declared source and family IDs. It can compare releases in the same catalog. The audit is pairwise and heuristic. Restrict catalog write access and keep independently protected backups or signed copies of ledger events and freezes. The local files provide no protection against an administrator rewriting or deleting the complete history.
+
+
+## Experimental GoXLM 0.4 architectures
+
+The trainer selects the legacy 0.2 baseline by default. Explicitly select
+`--architecture baseline`, `--architecture 10m`, or `--architecture 25m`
+to opt into the experimental schema. Set `--context-length` with a preset
+to choose a length from 32 to 1024. Experimental runs default to 128.
+These are validated configurations of the existing decoder, with tied
+embeddings, causal attention, random initialization, and the existing
+UTF-8 byte tokenizer.
+
+| Preset | Layers | Attention heads | Width | Parameters at context 128 |
+|---|---:|---:|---:|---:|
+| `baseline` | 4 | 4 | 256 | 3,257,856 |
+| `10m` | 6 | 6 | 384 | 10,795,008 |
+| `25m` | 8 | 8 | 512 | 25,416,704 |
+
+Training and validation use the selected context. Experimental outputs
+use `goxlm-checkpoint-0.4.0-experimental`, include the preset and exact
+configuration, and still pass through the same catalog, approval, and
+revocation checks. Resume requires the same architecture, context,
+precision, release, code, and environment. Existing 0.2 checkpoints remain
+readable. Strict resume of older runs uses the original code revision.
+Web 0.2 continues to use its existing adapters. A future adapter must
+explicitly opt into the experimental schema and validate its limits.
+
+Run the local CUDA check from the repository root in the environment
+with native BF16 support. It uses a temporary generated corpus and
+temporary checkpoints. It runs 24 steps per preset and precision at
+microbatch 8 and context 128, then checks a 12+12-step BF16 resume for
+the 10M preset in fresh processes. Standard CI remains CPU-only.
+
+```sh
+OMP_NUM_THREADS=1 ../.venv/bin/python -B -m training.benchmark_architectures
+```
+
+The report excludes the first four updates from throughput and step
+latency. Peak allocator statistics cover the segment through validation,
+while validation, save, and verified CPU load durations are separate.
+Keep any saved report in an ignored local runs directory.

@@ -6,7 +6,7 @@ import torch
 
 from .common import canonical, verify_baseline, write_json
 from .data import load_release, read
-from .model import generate
+from .model import ARCHITECTURES, generate
 from .run import PRECISIONS, RunConfig, evaluate, load_checkpoint, train
 
 
@@ -25,6 +25,8 @@ def main():
     training.add_argument("output", type=Path)
     training.add_argument("--steps", type=int, required=True)
     training.add_argument("--config", type=Path)
+    training.add_argument("--architecture", choices=tuple(ARCHITECTURES))
+    training.add_argument("--context-length", type=int)
     training.add_argument("--resume", type=Path)
     training.add_argument("--checkpoint-every", type=int, default=1)
     training.add_argument("--precision", choices=PRECISIONS, default="fp32")
@@ -44,7 +46,8 @@ def main():
     elif args.command == "train":
         config = RunConfig(**read(args.config)) if args.config else RunConfig()
         print(train(args.catalog, args.release, args.output, args.steps, args.device,
-                    config, args.resume, args.checkpoint_every, precision=args.precision))
+                    config, args.resume, args.checkpoint_every, precision=args.precision,
+                    architecture=args.architecture, context_length=args.context_length))
     else:
         model, checkpoint = load_checkpoint(args.checkpoint, args.device)
         if args.command == "generate":
