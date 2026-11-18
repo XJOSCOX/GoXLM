@@ -66,6 +66,8 @@ requires updating the digest and restarting.
 - **Frontend** uses the Next.js App Router, TypeScript, and Tailwind CSS.
   It renders the local workspace, settings, model information and status.
   It consumes NDJSON incrementally and stores history and theme in localStorage.
+  Graphite and True Black use locally bundled Geist Variable, licensed under
+  the [SIL Open Font License](https://github.com/vercel/geist-font).
 - **Backend** uses FastAPI and the local PyTorch Transformer. The model
   registry resolves IDs against the operator's allowlist, hashes the open
   checkpoint before weights-only loading, and moves a single selected model
