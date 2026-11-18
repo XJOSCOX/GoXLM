@@ -110,3 +110,11 @@ Thumbs.db
 *.sw[op]
 *.tmp
 *~
+
+# Local Next.js build and runtime
+node_modules/
+.next/
+*.tsbuildinfo
+/web/next-env.d.ts
+/web/playwright-report/
+/web/test-results/

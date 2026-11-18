@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+:root {
+  background: #0d1119;
+  font-family: "Segoe UI", Inter, system-ui, sans-serif;
+}
+
+.workspace {
+  color-scheme: dark;
+  --canvas: #0d1119;
+  --rail: #111722;
+  --panel: #141c29;
+  --panel-hover: #192535;
+  --line: #253142;
+  --text: #eef3fb;
+  --muted: #a8b5c8;
+  --quiet: #8191a7;
+  --accent: #7ae6c3;
+  --accent-ink: #10251e;
+  --accent-surface: #132d2a;
+  --error-bg: #332024;
+  --error: #ffb5bd;
+  --glow: #183835;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+.workspace[data-theme="light"] {
+  color-scheme: light;
+  --canvas: #f7f9fc;
+  --rail: #edf2f8;
+  --panel: #fff;
+  --panel-hover: #eaf3f4;
+  --line: #d5dfe9;
+  --text: #162338;
+  --muted: #465870;
+  --quiet: #52647a;
+  --accent: #156e56;
+  --accent-ink: #ffffff;
+  --accent-surface: #dcefe8;
+  --error-bg: #fbe8eb;
+  --error: #812c3d;
+  --glow: #d6ece8;
+}
+
+button:not(:disabled), select:not(:disabled) { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+button:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+textarea:focus-visible { outline: none; }
+.composer:focus-within { border-color: var(--accent); }
+.hero-halo {
+  background: radial-gradient(ellipse, var(--glow), transparent 70%);
+}
+.workspace ::selection { background: var(--accent); color: var(--accent-ink); }

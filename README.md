@@ -20,6 +20,7 @@ GOXLM_TEST_DEVICE=cpu OMP_NUM_THREADS=1 python -B -m unittest training.test_trai
 - [Example training configuration](configs/train.example.json)
 - [Public release checklist](PUBLIC_RELEASE.md)
 - [Local CUDA validation and benchmarking](training/CUDA.md)
+- [GoXLM Web local text-completion workspace](web/README.md)
 
 Public Git history tracks the source, tests, and documentation. Training inputs,
 checkpoints, rights evidence, reviewer records, and other research artifacts
