@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 import torch
 
 from goxlm_v02.model import MODEL, MODEL_VERSION, TOKENIZER, new_model
-from goxlm_v02.run import CHECKPOINT, LEGACY_CHECKPOINT, RunConfig
+from goxlm_v02.run import CHECKPOINT, EXPERIMENT_CHECKPOINT, LEGACY_CHECKPOINT, RunConfig
 from dataclasses import asdict
 
 from .api import create_app
@@ -89,6 +89,15 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(300, info["checkpoint_step"])
         self.assertEqual(128, info["context_length"])
         self.assertNotIn("path", info)
+
+    def test_web_02_adapter_rejects_experimental_checkpoints(self):
+        path = self.root / "test.pt"
+        torch.save({"schema": EXPERIMENT_CHECKPOINT}, path)
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        with patch("goxlm_v02.run.new_model") as allocate:
+            with self.assertRaisesRegex(CheckpointError, "could not be validated"):
+                load_local(entry(format="0.2", sha256=sha), "cpu", self.root)
+        allocate.assert_not_called()
 
     def test_corrupt_metadata_and_malformed_checkpoints(self):
         path = self.root / "test.pt"

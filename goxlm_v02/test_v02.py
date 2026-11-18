@@ -11,8 +11,9 @@ import torch
 
 from .common import canonical, digest, git_provenance, verify_baseline
 from .data import build, intake, load_release, read, review
-from .model import decode, encode, generate, new_model, windows
-from .run import CHECKPOINT, LEGACY_CHECKPOINT, RunConfig, evaluate, load_checkpoint, train
+from .model import decode, encode, experiment_config, generate, new_model, windows
+from .run import (CHECKPOINT, EXPERIMENT_CHECKPOINT, LEGACY_CHECKPOINT, RunConfig, evaluate,
+                  load_checkpoint, train)
 
 torch.set_num_threads(1)
 
@@ -158,6 +159,51 @@ class PipelineTests(unittest.TestCase):
                 if platform == "emulated":
                     supported.assert_called_once_with(including_emulation=False)
                 self.assertFalse(output.exists())
+
+    def test_experimental_presets_and_causality(self):
+        for preset, expected in (("baseline", 3_257_856), ("10m", 10_795_008), ("25m", 25_416_704)):
+            with self.subTest(preset=preset), torch.inference_mode():
+                model = new_model(experiment_config(preset)).eval()
+                self.assertEqual(expected, sum(p.numel() for p in model.parameters()))
+                left = torch.zeros((1, 128), dtype=torch.long)
+                right = left.clone()
+                right[:, 80:] = 12
+                first, _ = model(left)
+                other, _ = model(right)
+                torch.testing.assert_close(first[:, :80], other[:, :80])
+                self.assertFalse(torch.equal(first[:, -1], other[:, -1]))
+                with self.assertRaisesRegex(ValueError, "context length"):
+                    model(torch.zeros((1, 129), dtype=torch.long))
+        for bad in (True, 31, 1025):
+            with self.assertRaisesRegex(ValueError, "context length"):
+                experiment_config("10m", bad)
+
+    def test_experimental_checkpoint_resume_and_context(self):
+        self.enterContext(patch("goxlm_v02.run.verify_baseline"))
+        release = self.release()
+        flags = {"architecture": "10m", "context_length": 64}
+        config = RunConfig(batch_size=1)
+        direct = train(self.catalog, release, self.root / "direct-new", 2, "cpu", config, **flags)
+        half = train(self.catalog, release, self.root / "half-new", 1, "cpu", config, **flags)
+        resumed = train(self.catalog, release, self.root / "resume-new", 2, "cpu", config,
+                        resume=half, **flags)
+        model, saved = load_checkpoint(resumed)
+        _, expected = load_checkpoint(direct)
+        self.assertEqual(EXPERIMENT_CHECKPOINT, saved["schema"])
+        self.assertEqual(64, model.config.context_length)
+        for key, weight in saved["model"].items():
+            torch.testing.assert_close(expected["model"][key], weight, rtol=0, atol=0)
+        self.assertEqual(2, saved["optimizer_updates"])
+        self.assertEqual(expected["history"][-1]["validation"], saved["history"][-1]["validation"])
+        rows = [{"domain": "science", "text": "z" * 130}]
+        self.assertEqual(130, evaluate(model, rows, torch.device("cpu"))["overall"]["bytes"])
+        with self.assertRaisesRegex(ValueError, "matching data"):
+            train(self.catalog, release, self.root / "wrong-context", 2, "cpu", config, resume=half,
+                  **(flags | {"context_length": 128}))
+        corrupt = self.root / "inconsistent-preset.pt"
+        torch.save(dict(saved, architecture="25m"), corrupt)
+        with self.assertRaisesRegex(ValueError, "Unsupported checkpoint"):
+            load_checkpoint(corrupt)
 
     def test_reproducible_resume_and_evaluation(self):
         self.check_checkpoint_resume("fp32")
