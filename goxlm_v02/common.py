@@ -2,6 +2,8 @@
 import hashlib
 import json
 import os
+import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -19,6 +21,43 @@ def digest(raw):
 def canonical(value):
     return (json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False,
                        separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def source_fingerprint(root, paths):
+    return digest(canonical({path.relative_to(root).as_posix(): digest(path.read_bytes())
+                             for path in paths}))
+
+
+def git_provenance(root=None):
+    """Snapshot the source checkout, with null values when Git is unavailable."""
+    root = ROOT if root is None else Path(root)
+    unavailable = {"commit_sha": None, "dirty": None}
+    # An archive inside an unrelated repository has no GoXLM Git provenance.
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    try:
+        top = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            stderr=subprocess.DEVNULL, env=env, timeout=5,
+        )
+        if Path(os.fsdecode(top.rstrip(b"\n"))).resolve() != root.resolve():
+            return unavailable
+        status = subprocess.check_output(
+            ["git", "-C", str(root), "status", "--porcelain=v2", "--branch",
+             "--untracked-files=normal", "--ignore-submodules=none"],
+            stderr=subprocess.DEVNULL, env=env, timeout=5,
+        ).splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return unavailable
+
+    prefix = b"# branch.oid "
+    oid = next((line[len(prefix):] for line in status if line.startswith(prefix)), None)
+    if oid == b"(initial)":
+        commit = None
+    elif oid is not None and re.fullmatch(rb"[0-9a-f]{40}(?:[0-9a-f]{24})?", oid):
+        commit = oid.decode("ascii")
+    else:
+        return unavailable
+    return {"commit_sha": commit, "dirty": any(not line.startswith(b"# ") for line in status)}
 
 
 def publish(path, write):

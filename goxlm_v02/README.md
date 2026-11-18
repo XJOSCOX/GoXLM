@@ -11,6 +11,20 @@ Run commands from the repository root with a Python environment that includes Py
 GOXLM_TEST_DEVICE=cuda ../.venv/bin/python -B -m unittest -v goxlm_v02.test_v02.PipelineTests.test_reproducible_resume_and_evaluation
 ```
 
+## Legacy GoXLM-0.1 entry point
+
+Importing `training.train` performs no training. In the private workspace,
+the explicit historical entry point is:
+
+```sh
+python -m training.train --output checkpoints/goxlm_v01-reproduction.pt
+```
+
+This runs the original 300-step experiment on the local GoXLM-0.1 corpus. The
+output must be a new file. Checkpoint publication refuses an existing path,
+including a file created by a competing process before the save finishes. The
+original checkpoint layout and inference loader remain compatible.
+
 ## Build a catalog from authorized local files
 
 Use a new catalog directory on the Linux filesystem. Keep write access to approval records and the test freeze with authorized operators. Back up that directory with the release, as the training loader rechecks the original evidence and decisions. The tool captures evidence and verifies integrity. The designated reviewer verifies its authenticity, authority, applicability to the exact document, and commercial AI training scope. Record rejection if the evidence is inadequate. Releases contain document text and review metadata, so keep catalogs and releases private unless separately authorized.
@@ -37,7 +51,16 @@ The first successful build assigns related groups to splits by seeded hash, targ
 
 The trainer accepts a JSON snapshot via `--config` with `seed`, `batch_size`, `learning_rate`, `weight_decay`, and `grad_clip` (omitted fields use defaults). For resume, pass a 0.2 checkpoint via `--resume` and a fresh output directory. `--steps` is the absolute stopping step. A checkpoint is always emitted at the final step. Finalize selection on validation before requesting `--split test`. The test option is explicit but operator discipline controls its frequency. Evaluation reports loss and bits per UTF-8 byte, overall and by topic. It scores every byte with a fixed 128-byte window scheme. It is a language modeling metric and does not measure task accuracy.
 
-The byte tokenizer has no trained vocabulary. The 3,257,856 parameter model starts from random weights for every fresh run. Resume is limited to a matching 0.2 run identity. The checkpoint records a source-tree SHA-256 fingerprint because this project has no Git revision. Use trusted local checkpoint files. Deterministic resume is checked within the same environment. Timing, CPU time, memory and throughput values describe each invocation and naturally vary. GPU telemetry measures PyTorch allocation and reservation. Board power and energy are not recorded.
+The byte tokenizer has no trained vocabulary. The 3,257,856 parameter model starts from random weights for every fresh run. Resume is limited to a matching 0.2 run identity. The checkpoint and run manifest retain the source-tree SHA-256 fingerprint
+(`code_revision`) and record a separate `git` object with the checkout's
+`commit_sha` and `dirty` status at run start. Dirty includes staged changes,
+tracked edits, or non-ignored untracked files. Ignored private artifacts are
+outside that scope. Missing Git or a source export yields null fields. An
+unborn repository has a null commit and a measured dirty status. Older
+checkpoints remain loadable without Git metadata. Strict resume still requires
+the matching data, configuration, source fingerprint and environment recorded
+by the original run. A source change can require resuming from the original
+checkout. Use trusted local checkpoint files. Deterministic resume is checked within the same environment. Timing, CPU time, memory and throughput values describe each invocation and naturally vary. GPU telemetry measures PyTorch allocation and reservation. Board power and energy are not recorded.
 
 ## Corpus governance for GoXLM 0.3 preparation
 

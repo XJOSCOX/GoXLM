@@ -13,7 +13,7 @@ import time
 import torch
 import torch.nn.functional as F
 
-from .common import ROOT, canonical, digest, publish, verify_baseline, write_json
+from .common import ROOT, git_provenance, publish, source_fingerprint, verify_baseline, write_json
 from .data import affected_documents, catalog_lock, load_release, revoked
 from .model import MODEL, MODEL_VERSION, TOKENIZER, new_model, windows
 
@@ -41,8 +41,7 @@ class RunConfig:
 
 def revision():
     paths = [ROOT / "model" / "transformer.py", *sorted(Path(__file__).parent.glob("*.py"))]
-    return digest(canonical({path.relative_to(ROOT).as_posix(): digest(path.read_bytes())
-                             for path in paths}))
+    return source_fingerprint(ROOT, paths)
 
 
 def environment(device):
@@ -176,8 +175,9 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
         if device.type == "cuda":
             torch.cuda.set_rng_state_all(saved["rng"]["cuda"])
 
+    provenance = {"git": git_provenance()}
     output.mkdir(parents=True, exist_ok=False)
-    write_json(output / "run.0.2.json", {**identity, "target_step": steps,
+    write_json(output / "run.0.2.json", {**identity, **provenance, "target_step": steps,
                                        "resumed_from_step": start, "checkpoint_every": checkpoint_every})
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
@@ -217,7 +217,7 @@ def train(catalog, release, output, steps, device, config, resume=None, checkpoi
         if device.type == "cuda":
             hardware.update(gpu_peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
                             gpu_peak_reserved_bytes=torch.cuda.max_memory_reserved(device))
-        checkpoint = {**identity, "step": step, "model": model.state_dict(),
+        checkpoint = {**identity, **provenance, "step": step, "model": model.state_dict(),
                       "optimizer": optimizer.state_dict(), "history": history,
                       "hardware": hardware, "rng": {"python": random.getstate(),
                       "torch": torch.get_rng_state(), "sampler": sampler.get_state(),
