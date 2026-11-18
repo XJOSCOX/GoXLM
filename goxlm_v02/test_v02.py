@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import os
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ import torch
 from .common import canonical, digest, git_provenance, verify_baseline
 from .data import build, intake, load_release, read, review
 from .model import decode, encode, generate, new_model, windows
-from .run import RunConfig, evaluate, load_checkpoint, train
+from .run import CHECKPOINT, LEGACY_CHECKPOINT, RunConfig, evaluate, load_checkpoint, train
 
 torch.set_num_threads(1)
 
@@ -142,7 +143,26 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual({"commit_sha": git("rev-parse", "HEAD"), "dirty": True},
                          git_provenance(self.root))
 
+    def test_bf16_requires_native_cuda_before_creating_output(self):
+        output = self.root / "blocked"
+        for platform in ("cpu", "unavailable", "emulated"):
+            with self.subTest(platform=platform), patch("goxlm_v02.run.verify_baseline") as baseline, \
+                    patch("torch.cuda.is_available", return_value=platform == "emulated"), \
+                    patch("torch.cuda.device", return_value=nullcontext()), \
+                    patch("torch.cuda.is_bf16_supported", return_value=False) as supported:
+                device = "cpu" if platform == "cpu" else "cuda"
+                with self.assertRaisesRegex(ValueError, "native CUDA BF16 support"):
+                    train(self.catalog, self.root / "missing", output, 1, device, RunConfig(),
+                          precision="bf16")
+                baseline.assert_not_called()
+                if platform == "emulated":
+                    supported.assert_called_once_with(including_emulation=False)
+                self.assertFalse(output.exists())
+
     def test_reproducible_resume_and_evaluation(self):
+        self.check_checkpoint_resume("fp32")
+
+    def check_checkpoint_resume(self, precision):
         baseline = self.root / "synthetic-baseline.txt"
         baseline.write_bytes(b"Synthetic baseline fixture.\n")
         expected = {baseline.name: digest(baseline.read_bytes())}
@@ -154,33 +174,61 @@ class PipelineTests(unittest.TestCase):
         device = os.environ.get("GOXLM_TEST_DEVICE", "cpu")
         provenance = {"commit_sha": "a" * 40, "dirty": True}
         with patch("goxlm_v02.run.git_provenance", return_value=provenance):
-            one = train(self.catalog, release, self.root / "segment1", 1, device, config)
+            one = train(self.catalog, release, self.root / "segment1", 1, device, config,
+                        **({"precision": precision} if precision == "bf16" else {}))
         _, saved = load_checkpoint(one)
         self.assertEqual(provenance, saved["git"])
+        self.assertEqual(CHECKPOINT, saved["schema"])
+        self.assertEqual(precision, saved["precision"])
+        self.assertEqual(1, saved["optimizer_updates"])
         run = read(one.parent / "run.0.2.json")
         self.assertEqual(provenance, run["git"])
         self.assertEqual(saved["code_revision"], run["code_revision"])
-        old_checkpoint = self.root / "without-git.pt"
-        torch.save({key: value for key, value in saved.items() if key != "git"}, old_checkpoint)
+        if precision == "fp32":
+            old_checkpoint = self.root / "legacy-fp32.pt"
+            legacy = {key: value for key, value in saved.items()
+                      if key not in {"git", "precision", "optimizer_updates"}}
+            torch.save(dict(legacy, schema=LEGACY_CHECKPOINT), old_checkpoint)
+            resume = old_checkpoint
+        else:
+            resume = one
+            with self.assertRaisesRegex(ValueError, "Cannot change training precision"):
+                train(self.catalog, release, self.root / "wrong-precision", 2, device, config,
+                      resume=one, precision="fp32")
+            self.assertFalse((self.root / "wrong-precision").exists())
         two = train(self.catalog, release, self.root / "segment2", 2, device, config,
-                    resume=old_checkpoint)
-        direct = train(self.catalog, release, self.root / "direct", 2, device, config)
+                    resume=resume, precision=precision)
+        direct = train(self.catalog, release, self.root / "direct", 2, device, config,
+                       precision=precision)
         model, resumed = load_checkpoint(two, device)
         _, uninterrupted = load_checkpoint(direct, device)
         for name, value in resumed["model"].items():
             torch.testing.assert_close(value, uninterrupted["model"][name], rtol=0, atol=0)
         self.assertEqual(resumed["history"][-1]["validation"],
                          uninterrupted["history"][-1]["validation"])
+        self.assertEqual(2, resumed["optimizer_updates"])
+        self.assertEqual(precision, resumed["precision"])
+        for key, state in resumed["optimizer"]["state"].items():
+            for field, tensor in state.items():
+                self.assertEqual(torch.float32, tensor.dtype)
+                torch.testing.assert_close(tensor, uninterrupted["optimizer"]["state"][key][field],
+                                           rtol=0, atol=0)
+        metrics = read(two.parent / "metrics.0.2.json")
+        self.assertEqual(1, metrics["optimizer_updates"])
+        self.assertEqual(2, metrics["first_step"])
+        for field in ("training_seconds", "validation_seconds", "checkpoint_seconds"):
+            self.assertGreater(metrics[field], 0)
         self.assertEqual(str(device), resumed["environment"]["device"])
         self.assertGreater(resumed["hardware"]["process_peak_rss_bytes"], 0)
         if device == "cuda":
             self.assertGreater(resumed["hardware"]["gpu_peak_allocated_bytes"], 0)
             self.assertIn("3090", resumed["environment"]["gpu"])
         with self.assertRaises(FileExistsError):
-            train(self.catalog, release, self.root / "segment1", 1, device, config)
+            train(self.catalog, release, self.root / "segment1", 1, device, config,
+                  precision=precision)
         with self.assertRaisesRegex(ValueError, "matching data"):
             train(self.catalog, release, self.root / "mismatch", 2, device,
-                  RunConfig(batch_size=3), resume=one)
+                  RunConfig(batch_size=3), resume=one, precision=precision)
         rows = [row for row in load_release(self.catalog, release)["documents"]
                 if row["split"] == "test"]
         result = evaluate(model, rows, torch.device(device))
@@ -189,3 +237,7 @@ class PipelineTests(unittest.TestCase):
         torch.save({**resumed, "tokenizer": {"version": "other"}}, corrupt)
         with self.assertRaisesRegex(ValueError, "Unsupported checkpoint"):
             load_checkpoint(corrupt)
+        wrong_count = self.root / "wrong-count.pt"
+        torch.save(dict(resumed, optimizer_updates=0), wrong_count)
+        with self.assertRaisesRegex(ValueError, "step and optimizer update count"):
+            load_checkpoint(wrong_count)

@@ -49,6 +49,34 @@ The first successful build assigns related groups to splits by seeded hash, targ
 ../.venv/bin/python -B -m goxlm_v02 generate --catalog CATALOG CHECKPOINT 'The derivative of' --steps 20
 ```
 
+### Optional CUDA BF16
+
+The default is deterministic FP32. Set `--device cuda --precision bf16` to
+enable BF16 on a device with native support. The device check runs before
+the baseline and catalog are opened or output is created. Forward and loss
+use CUDA autocast. Model parameters, AdamW moments, and validation stay in
+FP32. Backward, gradient clipping, and optimizer updates run outside autocast.
+BF16 uses no gradient scaler. Nonfinite losses or gradients stop the run.
+Checkpoint publication also checks finite FP32 parameters and AdamW state
+and verifies each AdamW step against the completed update count.
+
+New checkpoints use `goxlm-checkpoint-0.2.2`. They retain dataset, tokenizer,
+configuration, source and environment identity, and save precision, completed
+optimizer updates, and Python, CPU, CUDA and sampler RNG states. Precision
+must match on resume. The reader and revocation audit accept both 0.2.1 and
+0.2.2. A 0.2.1 checkpoint is interpreted as FP32 and can be evaluated with
+the new reader. Exact resume still requires the source fingerprint and
+environment recorded by the saved run. For a checkpoint created by an older
+source revision, resume from that revision. All new checkpoints and segment
+reports are written to a fresh run directory.
+
+The `metrics.0.2.json` segment report measures training, validation, and
+checkpoint time separately. Training step time includes batch sampling,
+transfer, forward/backward, clipping, and the optimizer step through CUDA
+synchronization. Checkpoint time includes state validation, the rights
+check, and atomic serialization. Checkpoint hardware metrics report peak
+allocator usage through its validation boundary.
+
 The trainer accepts a JSON snapshot via `--config` with `seed`, `batch_size`, `learning_rate`, `weight_decay`, and `grad_clip` (omitted fields use defaults). For resume, pass a 0.2 checkpoint via `--resume` and a fresh output directory. `--steps` is the absolute stopping step. A checkpoint is always emitted at the final step. Finalize selection on validation before requesting `--split test`. The test option is explicit but operator discipline controls its frequency. Evaluation reports loss and bits per UTF-8 byte, overall and by topic. It scores every byte with a fixed 128-byte window scheme. It is a language modeling metric and does not measure task accuracy.
 
 The byte tokenizer has no trained vocabulary. The 3,257,856 parameter model starts from random weights for every fresh run. Resume is limited to a matching 0.2 run identity. The checkpoint and run manifest retain the source-tree SHA-256 fingerprint
