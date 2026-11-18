@@ -15,7 +15,7 @@ from .common import canonical, digest, write_json
 from .overlap import demo_hits, findings, fingerprint
 
 SCHEMA = "goxlm-dataset-0.2.1"
-DOMAINS = {"science", "technology", "math", "programming"}
+DOMAINS = {"science", "technology", "math", "programming", "general"}
 FIELDS = ("document_id", "source_id", "family_id", "title", "domain", "rights_holder",
           "source_reference", "rights_basis", "evidence_reference")
 

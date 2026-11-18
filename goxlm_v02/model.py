@@ -27,6 +27,12 @@ def experiment_config(architecture, context_length=128):
             "n_heads": heads, "n_embd": width}
 
 
+def conversation_config(vocab_size, context_length=256):
+    if type(context_length) is not int or context_length not in (256, 512):
+        raise ValueError("Conversation context length must be 256 or 512")
+    return {**experiment_config("25m", context_length), "vocab_size": vocab_size}
+
+
 def encode(text):
     return list(text.encode("utf-8"))
 
@@ -41,7 +47,10 @@ def new_model(config=None):
 
 def windows(text, context=MODEL["context_length"]):
     """Each target byte occurs once. Windows never cross documents."""
-    tokens = [TOKENIZER["document_prefix"], *encode(text)]
+    yield from token_windows([TOKENIZER["document_prefix"], *encode(text)], context)
+
+
+def token_windows(tokens, context):
     for start in range(0, len(tokens) - 1, context):
         part = tokens[start:start + context + 1]
         width = len(part) - 1

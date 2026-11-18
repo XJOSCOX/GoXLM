@@ -9,7 +9,7 @@ from goxlm_v02.data import catalog_lock, document_id, read, required
 from goxlm_v02.overlap import findings
 
 SCHEMA = "goxlm-review-store-0.3.1"
-DOMAINS = {"science", "math", "programming", "technology"}
+DOMAINS = {"science", "math", "programming", "technology", "general"}
 TEMPLATES = {
     "us_public_domain_expired": {
         "evidence_roles": ["rights_notice", "edition_provenance"],
@@ -26,6 +26,10 @@ TEMPLATES = {
     "voluntary_public_domain": {
         "evidence_roles": ["dedication_notice", "document_provenance"],
         "checks": "Verify the dedication covers the exact document revision and review any item-specific license exceptions.",
+    },
+    "original_dialogue": {
+        "evidence_roles": ["authorship_declaration", "signature_or_terms", "quality_review"],
+        "checks": "Verify exact human authorship, commercial-training scope, consent and withdrawal terms.",
     },
     "explicit_commercial_ai": {
         "evidence_roles": ["training_grant", "pinned_provenance"],
