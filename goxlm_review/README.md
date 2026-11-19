@@ -60,21 +60,52 @@ Run the synthetic suite without provider data.
 python -B -m unittest -v goxlm_review.test_transcript_intake
 ```
 
-Before preparing real inputs, an authorized operator must verify the executed data-use agreement, named recipient, active provider approval, exact delivery, commercial text-training scope, and the provider's age eligibility evidence. The program checks the operator's independent receipt digest and the exact file digests. It cannot authenticate an unsigned assertion, infer provider approval, or determine the meaning of a license. Keep agreement versions, source manifests and external approval evidence in protected storage.
+#### Storage on WSL2
 
-Use a real, current-user-owned directory with mode 0700, outside the project checkout, on a filesystem directly backed by Linux dm-crypt. This deliberately refuses other storage layouts. Arrange access controls, encrypted backups and applicable incident and deletion procedures separately. In that directory place real files with mode 0600.
+The ordinary WSL distribution filesystem and Windows shared paths do not pass the intake check. Use a dedicated Linux filesystem directly on a dm-crypt LUKS2 mapping. The program checks the running kernel's device identity, rejects Linux swap, requires an operator-owned mode-0700 root outside the checkout, and accepts only operator-owned mode-0600 regular files on the same volume. The CLI disables Linux process dumps before reading private inputs.
 
-- agreement.txt and provider-approval.txt hold the controlling evidence for this delivery. Do not store portal credentials in either.
-- transcripts.jsonl contains only normalized transcript records. Preserve separate private provenance mapping to the publisher's exact source bytes. Use stable, opaque IDs matching c_, r_ or s_ followed by 12–64 lowercase hexadecimal characters. Use provider pseudonyms or a consistent private mapping of those pseudonyms. Do not infer names or create links to external identities.
-- Each record has id, recording_id, speakers (exactly two IDs), participant_status, language, segment_start_ms, segment_end_ms and turns. A turn has speaker (0 or 1), start_ms, end_ms and text. Use source-recording-relative times. Set participant_status to all_adult_verified only from appropriate provider evidence about both participants at recording time. Otherwise use contains_minor or unknown. The script excludes every segment of a recording if any segment is flagged. Never include birth dates, ages, demographics, audio, or participant identities as model inputs. Keep any withheld content out of model or application logs.
-- heldout.json is an array of nonempty protected evaluation strings from a separate evaluation set.
-- scope.json has provider set to Open Yap 1K, the exact approved recipient, scope set to approved_transcript_only_commercial_training, status set to active, an opaque delivery_id (d_ plus 12–64 lowercase hexadecimal characters), and files with SHA-256 values under agreement, provider_approval, delivery and heldout. Use an independently retained anchor for these bytes. Re-check that the authorization and rights are still active before each use.
+Use a new, dedicated LUKS2 container or volume. The following is an example for a **fresh blank image** created specifically for this purpose. Size the image for the agreed transcript delivery and necessary evidence. The operator must confirm local storage policy and provision `cryptsetup`, its kernel module, and `gpgv`. Use interactive key entry and keep credentials separate.
+
+```sh
+sudo modprobe dm_crypt
+umask 077
+IMAGE=$(mktemp "$HOME/goxlm-open-yap.XXXXXXXX.luks")
+fallocate -l 8G "$IMAGE"
+sudo cryptsetup luksFormat --type luks2 "$IMAGE"
+sudo cryptsetup open "$IMAGE" goxlm-open-yap
+sudo mkfs.ext4 /dev/mapper/goxlm-open-yap
+sudo install -d -m 0700 /mnt/goxlm-open-yap
+sudo mount -o nodev,nosuid,noexec /dev/mapper/goxlm-open-yap /mnt/goxlm-open-yap
+sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /mnt/goxlm-open-yap/intake
+sudo cryptsetup status goxlm-open-yap
+findmnt -T /mnt/goxlm-open-yap/intake
+swapon --show
+```
+
+Set `swap=0` in the `[wsl2]` section of the Windows user's `.wslconfig`. Apply it with `wsl --shutdown` after saving active work and before reopening WSL. Confirm that `swapon --show` returns no devices. Close the mount and mapping after use. Verify backup and recovery procedures without using real transcripts.
+
+The storage check assumes a trusted host, WSL kernel and administrators, and that root provisions the LUKS2 mapping with cryptsetup. The volume protects files when locked or offline. An unlocked host, privileged software, host page/hibernation/crash files, and live VM snapshots can expose memory or plaintext. Before handling provider data, require host-level controls for these paths, including encryption of any host paging and hibernation storage or disabling it, preventing plaintext dumps and snapshots, and encrypting authorized backups. The WSL process cannot attest to these Windows controls. Keep transcripts out of synced paths, Web services, telemetry, logs and Git. Do not continue when storage or host controls remain unverified. [Microsoft WSL configuration](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
+
+#### Independent authorization
+
+An independent authorized reviewer must confirm the executed provider agreement, named recipient, exact delivery and normalized export, commercial text-training scope, age eligibility evidence at recording time, and active grant. Check the controlling provider evidence and any withdrawal before signing. The reviewer keeps their private signing key separate from the intake operator. An administrator independently verifies the reviewer key fingerprint, installs only current authorized reviewer public keys in the root-owned `/etc/goxlm/open-yap-reviewers.gpg` keyring, and removes keys when trust changes. No key supplied with a delivery can establish trust. Protect the keyring and its parent directories from non-root writes.
+
+Keep these real files at mode 0600 on the private volume.
+
+- `agreement.txt` and `provider-approval.txt` hold the controlling agreement and grant evidence. Preserve original signatures and metadata in the private evidence archive and bind exact evidence exports to the receipt. Do not put portal credentials in these files.
+- `source-manifest.json` and `age-evidence.json` preserve the provider's exact delivery mapping and age-eligibility evidence or verified evidence references. Use opaque IDs and keep raw identity information outside model inputs.
+- `transcripts.jsonl` contains the normalized delivery. IDs are stable and opaque, using `c_`, `r_` or `s_` plus 12–64 lowercase hexadecimal characters with no external identity linkage. Each record has `id`, `recording_id`, `speakers` (two IDs), `participant_status`, `language`, `segment_start_ms`, `segment_end_ms` and `turns`. A turn has `speaker` (0 or 1), `start_ms`, `end_ms` and `text`. Use recording-relative times. Assign `all_adult_verified` only when provider evidence covers both participants at recording time. Otherwise use `contains_minor` or `unknown`. Any flagged segment excludes the entire recording.
+- `heldout.json` is an array of nonempty independently protected evaluation strings.
+- `scope.json` has `provider` set to `Open Yap 1K`, the exact approved `recipient`, `scope` set to `approved_transcript_only_commercial_training`, `status` set to `active`, and a `delivery_id` using `d_` plus 12–64 lowercase hexadecimal characters. Its `files` object binds SHA-256 hashes under `agreement`, `provider_approval`, `source_manifest`, `age_evidence`, `heldout` and `delivery`. Its `review` object contains UTC dates `verified_on` and `valid_through`, and `findings` with `signed_provider_agreement`, `approved_recipient`, `authorized_delivery`, `commercial_text_training_scope`, `participant_age_evidence` and `active_provider_grant`, each set to `verified` only after the reviewer checks the finding.
+- `scope.json.sig` is the independent reviewer's binary OpenPGP detached signature of those exact receipt bytes, created with `gpg --local-user "$REVIEWER_KEY_FINGERPRINT" --output scope.json.sig --detach-sign scope.json` on the reviewer-controlled system. Retain the receipt SHA-256 independently. Use the authorization validity period and recheck withdrawal before each run.
 
 ```sh
 python -B -m goxlm_review.transcript_intake \
   "$PRIVATE_ROOT" --scope-sha256 "$TRUSTED_RECEIPT_SHA256" --recipient "$APPROVED_RECIPIENT"
 ```
 
-The script screens malformed or low-signal turns, sensitive-data patterns, quotation cues, held-out overlap, and exact or near-duplicate content. It never searches external services. All repeated speakers and recording segments stay within a single connected component, including links seen in records screened out later. The deterministic preview aims for an 80/10/10 word split and reports actual weights and component concentration. Fewer than three components block a three-way preview. A giant component or weak holdout can still make an otherwise valid preview unsuitable for training.
+The independent signature authenticates the reviewer's assertion. SHA-256 proves byte integrity. The operator and reviewer establish whether underlying provider evidence grants access because the program cannot interpret arbitrary provider signature formats or verify provider revocations offline.
 
-The hash-only preview is written once inside the encrypted root. It omits raw turns and speaker IDs, and stdout contains aggregate counts only. Every surviving record remains in quarantine pending item-level privacy, incorporated-material, provenance, quality and rights checks. Pattern filters cannot establish anonymization or rule out every borrowed passage. Do not stage a training release or publish transcripts, manifests that reconstruct transcripts, or raw examples. Preserve the prior rights ledger and review any provider-required withdrawal through the applicable contract and existing governance workflow.
+The script screens malformed or low-signal turns, sensitive-data patterns, quotation cues, held-out overlap, and exact or near-duplicate content. All repeated speakers and recording segments stay in one connected component, including links seen in excluded records. The deterministic preview aims for an 80/10/10 word split and reports actual component concentration. Fewer than three components block a three-way preview.
+
+The hash-only preview is written once inside the encrypted root. It omits raw turns and speaker IDs, and stdout contains aggregate counts only. Every surviving record remains quarantined pending item-level privacy, incorporated-material, provenance, quality and rights checks. Preserve provider confidentiality and non-redistribution, prohibit re-identification, and apply provider-required withdrawal and deletion through the existing governance workflow. A successful run grants no training approval.

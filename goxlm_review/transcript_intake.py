@@ -1,23 +1,36 @@
 """Offline, private screening of an authorized transcript-only delivery."""
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
 import re
+import resource
 import stat
+import subprocess
 from collections import Counter, defaultdict
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from goxlm_v02.common import ROOT, canonical, digest, write_json
 from goxlm_v02.overlap import terms
 
-POLICY = "goxlm-private-transcripts-v1"
+POLICY = "goxlm-private-transcripts-v2"
+TRUSTED_KEYRING = Path("/etc/goxlm/open-yap-reviewers.gpg")
+LUKS2 = re.compile(r"CRYPT-LUKS2-[0-9a-f]{32}-.+")
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+REVIEW_FINDINGS = (
+    "signed_provider_agreement", "approved_recipient", "authorized_delivery",
+    "commercial_text_training_scope", "participant_age_evidence", "active_provider_grant",
+)
 FILES = {
     "agreement": ("agreement.txt", 2 << 20),
     "provider_approval": ("provider-approval.txt", 2 << 20),
-    "delivery": ("transcripts.jsonl", 512 << 20),
+    "source_manifest": ("source-manifest.json", 16 << 20),
+    "age_evidence": ("age-evidence.json", 16 << 20),
     "heldout": ("heldout.json", 16 << 20),
+    "delivery": ("transcripts.jsonl", 512 << 20),
 }
 ID = re.compile(r"[a-z]_[0-9a-f]{12,64}\Z")
 SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -232,23 +245,59 @@ def encrypted_private_root(path):
         raise ValueError("Use a real mode-0700 root owned by the current operator.")
     block = Path(f"/sys/dev/block/{os.major(info.st_dev)}:{os.minor(info.st_dev)}/dm/uuid")
     try:
-        encrypted = block.read_text(encoding="ascii").startswith("CRYPT-")
+        uuid = block.read_text(encoding="ascii").strip()
     except OSError:
-        encrypted = False
-    if not encrypted:
-        raise ValueError("Use a filesystem directly on a verified Linux dm-crypt device.")
+        uuid = ""
+    if not LUKS2.fullmatch(uuid):
+        raise ValueError("Use a filesystem directly on a verified Linux dm-crypt LUKS2 device.")
+    swap = Path("/proc/swaps").read_text(encoding="ascii").splitlines()
+    if not swap or swap[0].split()[0:1] != ["Filename"] or any(line.strip() for line in swap[1:]):
+        raise ValueError("Disable Linux swap before reading restricted text.")
     return path
 
 
 def private_file(root, filename, cap):
     with os.fdopen(os.open(root / filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
         mode = os.fstat(stream.fileno())
-        if not stat.S_ISREG(mode.st_mode) or mode.st_uid != os.getuid() or stat.S_IMODE(mode.st_mode) != 0o600:
-            raise ValueError("Input files must be real mode-0600 files owned by the operator.")
+        if (not stat.S_ISREG(mode.st_mode) or mode.st_uid != os.getuid()
+                or stat.S_IMODE(mode.st_mode) != 0o600 or mode.st_dev != root.stat().st_dev):
+            raise ValueError("Input files must be real mode-0600 files owned by the operator on the private volume.")
         raw = stream.read(cap + 1)
         if not raw or len(raw) > cap:
             raise ValueError("Input file is empty or exceeds the stated limit.")
         return raw
+
+
+def trusted_keyring():
+    for directory in reversed(TRUSTED_KEYRING.parents):
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError("The reviewer trust directory must be administered by root.")
+    info = TRUSTED_KEYRING.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError("The reviewer keyring must be provisioned independently by an administrator.")
+    return TRUSTED_KEYRING
+
+
+def verify_reviewer_signature(receipt, signature):
+    keyring = trusted_keyring()
+    # Verify the same bytes parsed below without reopening operator paths or writing
+    # a new plaintext file. The trust keyring comes from outside the delivery.
+    with (os.fdopen(os.memfd_create("goxlm-review"), "w+b") as reviewed,
+          os.fdopen(os.memfd_create("goxlm-signature"), "w+b") as signed):
+        for stream, raw in ((reviewed, receipt), (signed, signature)):
+            stream.write(raw)
+            stream.flush()
+            stream.seek(0)
+        inputs = (signed.fileno(), reviewed.fileno())
+        result = subprocess.run(
+            ["/usr/bin/gpgv", "--homedir", str(keyring.parent), "--keyring", str(keyring),
+             *[f"/proc/self/fd/{fd}" for fd in inputs]],
+            pass_fds=inputs, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=15,
+        )
+        if result.returncode:
+            raise ValueError("The authorization receipt lacks an independently trusted reviewer signature.")
 
 
 def intake(root, anchor, recipient):
@@ -256,17 +305,29 @@ def intake(root, anchor, recipient):
     receipt = private_file(root, "scope.json", 64 << 10)
     if not SHA.fullmatch(anchor) or digest(receipt) != anchor:
         raise ValueError("Authorization receipt does not match its trusted SHA-256 anchor.")
+    verify_reviewer_signature(receipt, private_file(root, "scope.json.sig", 64 << 10))
     scope = json.loads(receipt)
-    if not isinstance(scope, dict) or set(scope) != {"provider", "recipient", "scope", "status", "files", "delivery_id"}:
+    if not isinstance(scope, dict) or set(scope) != {
+        "provider", "recipient", "scope", "status", "files", "delivery_id", "review",
+    }:
         raise ValueError("Missing or unexpected fields in the authorization receipt.")
     if (scope["provider"] != "Open Yap 1K" or scope["recipient"] != recipient or not recipient.strip()
             or scope["scope"] != "approved_transcript_only_commercial_training"
             or scope["status"] != "active" or not isinstance(scope["delivery_id"], str)
             or not ID.fullmatch(scope["delivery_id"]) or not scope["delivery_id"].startswith("d_")):
         raise ValueError("Recipient or authorized delivery scope mismatch.")
+    review = scope["review"]
+    if (not isinstance(review, dict) or set(review) != {"verified_on", "valid_through", "findings"}
+            or not all(isinstance(review[key], str) and DATE.fullmatch(review[key])
+                       for key in ("verified_on", "valid_through"))
+            or review["findings"] != {name: "verified" for name in REVIEW_FINDINGS}):
+        raise ValueError("A signed review must verify every required provider and age finding.")
+    today = datetime.now(timezone.utc).date()
+    if not date.fromisoformat(review["verified_on"]) <= today <= date.fromisoformat(review["valid_through"]):
+        raise ValueError("The signed review is outside its validity period.")
     if not isinstance(scope["files"], dict) or set(scope["files"]) != set(FILES):
-        raise ValueError("Bind agreement, approval, delivery and held-out evidence.")
-    for key, wanted in scope["files"].items():
+        raise ValueError("Bind all provider evidence, delivery and held-out files.")
+    for wanted in scope["files"].values():
         if not isinstance(wanted, str) or not SHA.fullmatch(wanted):
             raise ValueError("Invalid bound file digest.")
     payloads = {}
@@ -274,13 +335,21 @@ def intake(root, anchor, recipient):
         value = private_file(root, name, cap)
         if digest(value) != scope["files"][key]:
             raise ValueError("A bound input file differs from the authorization receipt.")
-        if key in {"delivery","heldout"}:
+        if key in {"delivery", "heldout"}:
             payloads[key] = value
     records = (json.loads(line) for line in payloads["delivery"].splitlines() if line.strip())
     report = screen(records, json.loads(payloads["heldout"]))
-    report.update(scope_receipt_sha256=anchor, bound_files=scope["files"], delivery_id=scope["delivery_id"])
+    report.update(scope_receipt_sha256=anchor, reviewer_signature_verified=True,
+                  bound_files=scope["files"], delivery_id=scope["delivery_id"])
     write_json(root / "screened-preview.json", report)
     return {key: val for key, val in report.items() if key not in {"records", "delivery_id", "bound_files"}}
+
+
+def disable_process_dumps():
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    # PR_SET_DUMPABLE also prevents Linux piping a core image to a dump handler.
+    if ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "Failed to disable process dumps")
 
 
 def main():
@@ -290,8 +359,9 @@ def main():
     parser.add_argument("--recipient", required=True)
     args = parser.parse_args()
     try:
+        disable_process_dumps()
         print(json.dumps(intake(args.private_root, args.scope_sha256, args.recipient), sort_keys=True))
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
         # Diagnostics must not echo a transcript, speaker ID or provider credential.
         parser.exit(2, "Transcript screening stopped. Check the private intake requirements.\n")
 

@@ -1,12 +1,18 @@
 """Synthetic-only tests for private conversational corpora."""
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from goxlm_review.transcript_intake import FILES, intake, private_file, screen
+from goxlm_review.transcript_intake import (
+    FILES, REVIEW_FINDINGS, encrypted_private_root, intake, private_file, screen,
+    trusted_keyring, verify_reviewer_signature,
+)
 from goxlm_v02.common import canonical, digest
 
 HELDOUT = ["The empty paper carton stayed on the bench while the neighbor washed several garden tools nearby."]
@@ -103,6 +109,7 @@ class TranscriptIntakeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             payload = {"agreement": b"synthetic scope only", "provider_approval": b"fake receipt",
+                       "source_manifest": b"synthetic source", "age_evidence": b"synthetic adults",
                        "delivery": canonical(row(1, 1, (1, 2))), "heldout": canonical(HELDOUT)}
             def put(name, raw, mode=0o600):
                 p = root / name
@@ -111,12 +118,36 @@ class TranscriptIntakeTests(unittest.TestCase):
                 return p
             for key, (name, _) in FILES.items():
                 put(name, payload[key])
-            scope = canonical({"provider": "Open Yap 1K", "recipient": "Synthetic fixture",
+            today = datetime.now(timezone.utc).date().isoformat()
+            statement = {"provider": "Open Yap 1K", "recipient": "Synthetic fixture",
                                "scope": "approved_transcript_only_commercial_training", "status": "active",
                                "delivery_id": ident("d", 1),
-                               "files": {k: digest(v) for k, v in payload.items()}})
+                               "review": {"verified_on": today, "valid_through": today,
+                                          "findings": dict.fromkeys(REVIEW_FINDINGS, "verified")},
+                               "files": {k: digest(v) for k, v in payload.items()}}
+            scope = canonical(statement)
             put("scope.json", scope)
-            with patch("goxlm_review.transcript_intake.encrypted_private_root", return_value=root):
+            with (patch("goxlm_review.transcript_intake.encrypted_private_root", return_value=root),
+                  patch("goxlm_review.transcript_intake.verify_reviewer_signature") as verify):
+                with self.assertRaises(FileNotFoundError):
+                    intake(root, digest(scope), "Synthetic fixture")
+                put("scope.json.sig", b"synthetic fixture signature")
+                verify.side_effect = ValueError("untrusted signature")
+                with self.assertRaisesRegex(ValueError, "untrusted signature"):
+                    intake(root, digest(scope), "Synthetic fixture")
+                verify.side_effect = None
+                statement["review"]["findings"]["participant_age_evidence"] = "unknown"
+                unverified = canonical(statement)
+                put("scope.json", unverified)
+                with self.assertRaisesRegex(ValueError, "every required"):
+                    intake(root, digest(unverified), "Synthetic fixture")
+                statement["review"]["findings"]["participant_age_evidence"] = "verified"
+                statement["review"]["valid_through"] = "2000-01-01"
+                expired = canonical(statement)
+                put("scope.json", expired)
+                with self.assertRaisesRegex(ValueError, "validity period"):
+                    intake(root, digest(expired), "Synthetic fixture")
+                put("scope.json", scope)
                 with self.assertRaisesRegex(ValueError, "anchor"):
                     intake(root, "0" * 64, "Synthetic fixture")
                 with self.assertRaisesRegex(ValueError, "scope mismatch"):
@@ -143,6 +174,51 @@ class TranscriptIntakeTests(unittest.TestCase):
             with patch("pathlib.Path.read_text", side_effect=FileNotFoundError):
                 with self.assertRaisesRegex(ValueError, "dm-crypt"):
                     intake(Path(td), "0" * 64, "Synthetic fixture")
+
+    def test_storage_rejects_active_swap_and_non_luks_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            luks_uuid = "CRYPT-LUKS2-" + "a" * 32 + "-goxlm"
+            header = "Filename\tType\tSize\tUsed\tPriority\n"
+
+            def read(path, **kwargs):
+                return header if path == Path("/proc/swaps") else luks_uuid
+
+            with patch("pathlib.Path.read_text", autospec=True, side_effect=read):
+                self.assertEqual(root, encrypted_private_root(root))
+            with patch("pathlib.Path.read_text", side_effect=[luks_uuid, header + "/dev/sdc partition 8 0 -2\n"]):
+                with self.assertRaisesRegex(ValueError, "swap"):
+                    encrypted_private_root(root)
+            with patch("pathlib.Path.read_text", return_value="CRYPT-PLAIN-name"):
+                with self.assertRaisesRegex(ValueError, "LUKS2"):
+                    encrypted_private_root(root)
+            root.chmod(0o755)
+            with self.assertRaisesRegex(ValueError, "0700"):
+                encrypted_private_root(root)
+
+    @unittest.skipUnless(shutil.which("gpg") and Path("/usr/bin/gpgv").is_file(), "GnuPG tools unavailable")
+    def test_trusted_signature_verifies_exact_receipt(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            keyring, data, sig = (home / name for name in ("reviewers.gpg", "receipt", "receipt.sig"))
+            gpg = ["gpg", "--homedir", td, "--batch", "--pinentry-mode", "loopback", "--passphrase", ""]
+            def run(*args):
+                return subprocess.run([*gpg, *args], capture_output=True, check=True, timeout=30).stdout
+
+            run("--quick-generate-key", "Synthetic Reviewer <fixture@example.invalid>", "ed25519", "sign", "1d")
+            keyring.write_bytes(run("--export"))
+            data.write_bytes(b"exact synthetic receipt")
+            run("--output", str(sig), "--detach-sign", str(data))
+            with patch("goxlm_review.transcript_intake.trusted_keyring", return_value=keyring):
+                verify_reviewer_signature(data.read_bytes(), sig.read_bytes())
+                with self.assertRaisesRegex(ValueError, "trusted reviewer signature"):
+                    verify_reviewer_signature(b"tampered receipt with matching replacement hash", sig.read_bytes())
+                with self.assertRaisesRegex(ValueError, "trusted reviewer signature"):
+                    verify_reviewer_signature(data.read_bytes(), b"synthetic fake signature")
+            with patch("goxlm_review.transcript_intake.TRUSTED_KEYRING", keyring):
+                home.chmod(0o777)
+                with self.assertRaisesRegex(ValueError, "administered by root"):
+                    trusted_keyring()
 
 
 if __name__ == "__main__":
