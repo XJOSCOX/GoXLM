@@ -12,6 +12,7 @@ from goxlm_v02.common import canonical, digest
 from goxlm_v02.data import read
 
 from .__main__ import main
+from .browse import effort_directory, notice_preview, session, verified_queue
 from .ledger import GENESIS, record, report, status
 from .staging import batch, case, init
 
@@ -48,6 +49,49 @@ class PilotTests(unittest.TestCase):
                 "decision_date": "2026-11-18", "rationale": "Exercise decision flow",
                 "extract_sha256": sha, "commercial_ai_training": action == "approve",
                 "findings_acknowledged": True, "jurisdiction": "US", **changes}
+
+    def test_review_browser_is_read_only_and_logs_actual_effort_separately(self):
+        text = ("First line.\n" * 32 + "Last line.\n").encode()
+        batch(self.store, [self.item("first", text, "shared"),
+                           self.item("second", text, "shared")], self.path)
+        cases, head, events, decisions, _ = status(self.store)
+        queue = [{"id": key, "case_sha256": cases[key]["case_sha256"], "minutes": [5, 10]}
+                 for key in ("first", "second")]
+        effort = effort_directory(self.store, self.path / "effort")
+        private_files = {p: p.read_bytes() for p in self.store.rglob("*") if p.is_file()}
+        replies = iter([">", "e 1", "t nan", "t 5.25", "n", "j 1", "p", "q"])
+        output = []
+        session(self.store, verified_queue(queue, cases), cases, decisions, effort,
+                read=lambda _: next(replies), emit=output.append)
+        screen = "\n".join(output)
+        self.assertIn("Last line.", screen)
+        self.assertIn("Exact duplicate IDs second", screen)
+        self.assertIn("Same-family IDs second", screen)
+        self.assertIn("positive elapsed duration", screen)
+        self.assertEqual(1, screen.count("Shared publisher evidence"))
+        entries = list(effort.glob("*.json"))
+        self.assertEqual(1, len(entries))
+        entry = read(entries[0])
+        self.assertEqual(5.25, entry["elapsed_seconds"])
+        self.assertEqual(cases["first"]["record"]["extract"]["sha256"], entry["extract_sha256"])
+        self.assertNotIn("decision", entry)
+        self.assertEqual((head, events, decisions), status(self.store)[1:4])
+        self.assertEqual(private_files, {p: p.read_bytes() for p in self.store.rglob("*") if p.is_file()})
+
+    def test_review_notice_html_preview_preserves_policy_text(self):
+        preview = notice_preview(b"<html><nav>Site navigation</nav>"
+                                 b"<article><p>Reuse &amp; attribution.</p></article></html>")
+        self.assertIn("Reuse & attribution.", preview)
+        self.assertNotIn("Site navigation", preview)
+        self.assertIn("exact object", preview)
+
+    def test_review_browser_rejects_changed_queue_binding_and_protected_effort_path(self):
+        batch(self.store, [self.item("first", b"Review requires the exact candidate.")], self.path)
+        cases, *_ = status(self.store)
+        with self.assertRaisesRegex(ValueError, "fingerprint changed"):
+            verified_queue([{"id": "first", "case_sha256": "0" * 64, "minutes": [5, 10]}], cases)
+        with self.assertRaisesRegex(ValueError, "separate from the protected store"):
+            effort_directory(self.store, self.store / "decisions")
 
     def test_reproducible_batch_costs_and_overlap(self):
         a = self.item("left", b"The rotating frame introduces an apparent force in the equations of motion.")

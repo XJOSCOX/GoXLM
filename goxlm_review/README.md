@@ -41,3 +41,12 @@ metadata. `review batch MANIFEST --input-root LOCAL_INPUTS` checks supplied
 hashes and stages local bytes for review. Supply source and evidence references
 as provenance metadata. Staging and automated findings do not authorize use.
 Run `python -B -m goxlm_review "$STORE" --help` for the interface.
+
+
+### Read-only case browser
+
+Create a private queue outside the repository's tracked files. The JSON array has one entry per case, with `id`, the complete `case_sha256` from the case envelope, and a two-element `minutes` array for the estimated review range.
+
+Run `python -B -m goxlm_review.browse STORE QUEUE.json` from an interactive local terminal. Use `n` and `p` to change cases, `j N` to jump, `>` and `<` to page through the exact extract, and `e N` to inspect an archived evidence item. The browser verifies staged objects and the decision chain, then references shared rights notices by digest and displays each shared notice once per session. Evidence and originals are read locally without opening links.
+
+For optional elapsed-time tracking, pass `--effort-dir PRIVATE_DIR`, using a mode-0700 directory outside the protected store. After measuring time spent on the displayed exact extract, enter `t SECONDS`. Each entry records case and extract hashes and the elapsed time entered by the reviewer. It does not infer consent or a decision. Use the existing interactive protected workflow to record any separate rights decision.
